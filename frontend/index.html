@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>地下管廊综合监控与智能运维系统</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="header">
+            <div class="header-left">
+                <div class="logo">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <rect x="2" y="8" width="28" height="16" rx="2" stroke="#00d4ff" stroke-width="2"/>
+                        <circle cx="8" cy="16" r="3" fill="#00ff88"/>
+                        <circle cx="16" cy="16" r="3" fill="#ffaa00"/>
+                        <circle cx="24" cy="16" r="3" fill="#00d4ff"/>
+                    </svg>
+                </div>
+                <div class="title">
+                    <h1>地下管廊综合监控与智能运维系统</h1>
+                    <p class="subtitle">Underground Pipe Corridor Monitoring System</p>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="system-time" id="systemTime">--:--:--</div>
+                <div class="connection-status" id="connectionStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">连接中...</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <aside class="sidebar">
+                <div class="panel health-panel">
+                    <h3 class="panel-title">
+                        <span class="panel-icon">📊</span>
+                        管廊健康度
+                    </h3>
+                    <div class="health-score-container">
+                        <div class="health-score" id="overallHealthScore">--</div>
+                        <div class="health-label">综合评分</div>
+                    </div>
+                    <div class="health-components">
+                        <div class="health-item">
+                            <span class="item-name">环境监测</span>
+                            <div class="item-bar"><div class="bar-fill" id="envScoreBar" style="width: 0%"></div></div>
+                            <span class="item-value" id="envScore">--</span>
+                        </div>
+                        <div class="health-item">
+                            <span class="item-name">井盖状态</span>
+                            <div class="item-bar"><div class="bar-fill" id="manholeScoreBar" style="width: 0%"></div></div>
+                            <span class="item-value" id="manholeScore">--</span>
+                        </div>
+                        <div class="health-item">
+                            <span class="item-name">通风系统</span>
+                            <div class="item-bar"><div class="bar-fill" id="fanScoreBar" style="width: 0%"></div></div>
+                            <span class="item-value" id="fanScore">--</span>
+                        </div>
+                        <div class="health-item">
+                            <span class="item-name">排水系统</span>
+                            <div class="item-bar"><div class="bar-fill" id="pumpScoreBar" style="width: 0%"></div></div>
+                            <span class="item-value" id="pumpScore">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel cabin-panel">
+                    <h3 class="panel-title">
+                        <span class="panel-icon">🏗️</span>
+                        舱室状态
+                    </h3>
+                    <div class="cabin-list">
+                        <div class="cabin-item" data-cabin="power">
+                            <div class="cabin-header">
+                                <span class="cabin-color power"></span>
+                                <span class="cabin-name">电力舱</span>
+                                <span class="cabin-score" id="powerScore">--</span>
+                            </div>
+                            <div class="cabin-details">
+                                <span>设备: <b id="powerDeviceCount">--</b></span>
+                                <span>告警: <b id="powerAlarmCount" class="alarm-count">0</b></span>
+                            </div>
+                        </div>
+                        <div class="cabin-item" data-cabin="water">
+                            <div class="cabin-header">
+                                <span class="cabin-color water"></span>
+                                <span class="cabin-name">水信舱</span>
+                                <span class="cabin-score" id="waterScore">--</span>
+                            </div>
+                            <div class="cabin-details">
+                                <span>设备: <b id="waterDeviceCount">--</b></span>
+                                <span>告警: <b id="waterAlarmCount" class="alarm-count">0</b></span>
+                            </div>
+                        </div>
+                        <div class="cabin-item" data-cabin="gas">
+                            <div class="cabin-header">
+                                <span class="cabin-color gas"></span>
+                                <span class="cabin-name">燃气舱</span>
+                                <span class="cabin-score" id="gasScore">--</span>
+                            </div>
+                            <div class="cabin-details">
+                                <span>设备: <b id="gasDeviceCount">--</b></span>
+                                <span>告警: <b id="gasAlarmCount" class="alarm-count">0</b></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel stats-panel">
+                    <h3 class="panel-title">
+                        <span class="panel-icon">📈</span>
+                        本月故障统计
+                    </h3>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-value" id="totalAlarms">--</div>
+                            <div class="stat-label">告警总数</div>
+                        </div>
+                        <div class="stat-card critical">
+                            <div class="stat-value" id="criticalAlarms">--</div>
+                            <div class="stat-label">严重告警</div>
+                        </div>
+                        <div class="stat-card warning">
+                            <div class="stat-value" id="warningAlarms">--</div>
+                            <div class="stat-label">警告</div>
+                        </div>
+                        <div class="stat-card fault">
+                            <div class="stat-value" id="faultDevices">--</div>
+                            <div class="stat-label">故障设备</div>
+                        </div>
+                    </div>
+                    <canvas id="alarmTypeChart" class="mini-chart"></canvas>
+                </div>
+
+                <div class="panel filter-panel">
+                    <h3 class="panel-title">
+                        <span class="panel-icon">🔍</span>
+                        图层过滤
+                    </h3>
+                    <div class="filter-group">
+                        <label class="filter-item">
+                            <input type="checkbox" id="filterEnv" checked>
+                            <span class="filter-icon env"></span>
+                            <span>环境传感器 (200)</span>
+                        </label>
+                        <label class="filter-item">
+                            <input type="checkbox" id="filterManhole" checked>
+                            <span class="filter-icon manhole"></span>
+                            <span>井盖传感器 (100)</span>
+                        </label>
+                        <label class="filter-item">
+                            <input type="checkbox" id="filterFan" checked>
+                            <span class="filter-icon fan"></span>
+                            <span>风机 (30)</span>
+                        </label>
+                        <label class="filter-item">
+                            <input type="checkbox" id="filterPump" checked>
+                            <span class="filter-icon pump"></span>
+                            <span>排水泵 (50)</span>
+                        </label>
+                    </div>
+                    <div class="filter-group">
+                        <div class="legend-item">
+                            <span class="status-dot normal"></span>
+                            <span>正常</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="status-dot warning"></span>
+                            <span>预警</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="status-dot fault"></span>
+                            <span>故障</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="status-dot offline"></span>
+                            <span>离线</span>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="map-container">
+                <div id="map"></div>
+                <div class="map-controls">
+                    <button class="map-btn" id="btnZoomIn" title="放大">+</button>
+                    <button class="map-btn" id="btnZoomOut" title="缩小">−</button>
+                    <button class="map-btn" id="btnFitView" title="全览">⤢</button>
+                    <div class="map-legend">
+                        <div class="legend-title">管廊走向</div>
+                        <div class="legend-item"><span class="legend-line power"></span><span>电力舱</span></div>
+                        <div class="legend-item"><span class="legend-line water"></span><span>水信舱</span></div>
+                        <div class="legend-item"><span class="legend-line gas"></span><span>燃气舱</span></div>
+                    </div>
+                </div>
+                <div class="device-info-overlay" id="deviceInfoOverlay">
+                    <div class="info-content">
+                        <span class="close-btn" onclick="closeDeviceOverlay()">&times;</span>
+                        <div id="overlayContent"></div>
+                    </div>
+                </div>
+            </main>
+
+            <aside class="right-panel">
+                <div class="panel alarm-panel">
+                    <div class="panel-header">
+                        <h3 class="panel-title">
+                            <span class="panel-icon">⚠️</span>
+                            实时告警
+                            <span class="alarm-badge" id="alarmBadge">0</span>
+                        </h3>
+                        <button class="btn-clear" onclick="acknowledgeAllAlarms()">全部确认</button>
+                    </div>
+                    <div class="alarm-list" id="alarmList">
+                        <div class="empty-state">暂无告警</div>
+                    </div>
+                </div>
+
+                <div class="panel device-panel" id="deviceDetailPanel">
+                    <h3 class="panel-title">
+                        <span class="panel-icon">🔧</span>
+                        设备详情
+                    </h3>
+                    <div id="deviceDetailContent">
+                        <div class="empty-state">点击地图上的设备查看详情</div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <div class="alarm-modal" id="alarmModal">
+            <div class="alarm-modal-content">
+                <div class="alarm-modal-header">
+                    <span class="alarm-icon">🚨</span>
+                    <h2 id="alarmModalTitle">告警通知</h2>
+                </div>
+                <div class="alarm-modal-body">
+                    <p id="alarmModalMessage"></p>
+                    <div class="alarm-modal-info">
+                        <span>设备: <b id="alarmModalDevice"></b></span>
+                        <span>舱室: <b id="alarmModalCabin"></b></span>
+                        <span>时间: <b id="alarmModalTime"></b></span>
+                    </div>
+                </div>
+                <div class="alarm-modal-footer">
+                    <button class="btn-secondary" onclick="closeAlarmModal()">关闭</button>
+                    <button class="btn-primary" onclick="acknowledgeModalAlarm()">确认告警</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/config.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/map.js"></script>
+    <script src="js/websocket.js"></script>
+    <script src="js/charts.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
