@@ -1,0 +1,273 @@
+version: '3.8'
+
+x-common-config: &common-config
+  restart: unless-stopped
+  networks:
+    - pipe-corridor-network
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  mongo1:
+    <<: *common-config
+    image: mongo:7.0
+    container_name: mongo1
+    command: mongod --replSet rs0 --shardsvr --port 27017 --bind_ip_all --noauth
+    volumes:
+      - mongo1_data:/data/db
+      - mongo1_config:/data/configdb
+    ports:
+      - "27017:27017"
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  mongo2:
+    <<: *common-config
+    image: mongo:7.0
+    container_name: mongo2
+    command: mongod --replSet rs0 --shardsvr --port 27018 --bind_ip_all --noauth
+    volumes:
+      - mongo2_data:/data/db
+      - mongo2_config:/data/configdb
+    ports:
+      - "27018:27018"
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  mongo3:
+    <<: *common-config
+    image: mongo:7.0
+    container_name: mongo3
+    command: mongod --replSet rs0 --shardsvr --port 27019 --bind_ip_all --noauth
+    volumes:
+      - mongo3_data:/data/db
+      - mongo3_config:/data/configdb
+    ports:
+      - "27019:27019"
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  mongocfg1:
+    <<: *common-config
+    image: mongo:7.0
+    container_name: mongocfg1
+    command: mongod --configsvr --replSet cfg0 --port 27019 --bind_ip_all --noauth
+    volumes:
+      - mongocfg1_data:/data/db
+    logging: *default-logging
+
+  mongos:
+    <<: *common-config
+    image: mongo:7.0
+    container_name: mongos
+    command: mongos --configdb cfg0/mongocfg1:27019 --bind_ip_all --port 27020
+    ports:
+      - "27020:27020"
+    depends_on:
+      mongocfg1:
+        condition: service_started
+      mongo1:
+        condition: service_healthy
+      mongo2:
+        condition: service_healthy
+      mongo3:
+        condition: service_healthy
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27020", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  mongo-init:
+    <<: *common-config
+    image: mongo:7.0
+    container_name: mongo-init
+    volumes:
+      - ./docker/mongo-init.sh:/docker-entrypoint-initdb.d/mongo-init.sh
+      - ./mongodb/init.js:/docker-entrypoint-initdb.d/init.js
+    command: ["bash", "/docker-entrypoint-initdb.d/mongo-init.sh"]
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo2:
+        condition: service_healthy
+      mongo3:
+        condition: service_healthy
+      mongos:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  redis:
+    <<: *common-config
+    image: redis:7.2-alpine
+    container_name: redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging: *default-logging
+
+  mqtt-broker:
+    <<: *common-config
+    image: eclipse-mosquitto:2.0.18
+    container_name: mqtt-broker
+    volumes:
+      - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mqtt_data:/mosquitto/data
+      - mqtt_log:/mosquitto/log
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t 'test' -m 'test' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging: *default-logging
+
+  backend:
+    <<: *common-config
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: backend
+    depends_on:
+      mongos:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      - MONGODB_URL=mongodb://mongos:27020,mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0
+      - REDIS_URL=redis://redis:6379/0
+      - MQTT_BROKER=mqtt-broker
+      - MQTT_PORT=1883
+    ports:
+      - "8000:8000"
+    logging: *default-logging
+
+  frontend:
+    <<: *common-config
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    logging: *default-logging
+
+  lora-simulator:
+    <<: *common-config
+    build:
+      context: .
+      dockerfile: Dockerfile.simulator
+    container_name: lora-simulator
+    command: python scripts/lora_gateway_simulator.py --api-url http://backend:8000/api
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - LORA_SENSOR_COUNT=200
+      - LORA_INTERVAL=60
+      - LORA_METHANE_MIN=0.0
+      - LORA_METHANE_MAX=0.1
+      - LORA_H2S_MIN=0.0
+      - LORA_H2S_MAX=5.0
+      - LORA_OXYGEN_MIN=19.5
+      - LORA_OXYGEN_MAX=21.0
+      - LORA_TEMP_MIN=22
+      - LORA_TEMP_MAX=28
+      - LORA_BATCH_SIZE=50
+      - LORA_USE_BATCH=true
+    volumes:
+      - ./scripts:/app/scripts
+    logging: *default-logging
+
+  plc-simulator:
+    <<: *common-config
+    build:
+      context: .
+      dockerfile: Dockerfile.simulator
+    container_name: plc-simulator
+    command: python scripts/mqtt_plc_simulator.py --broker mqtt-broker --port 1883
+    depends_on:
+      mqtt-broker:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/app/scripts
+    logging: *default-logging
+
+  sms-simulator:
+    <<: *common-config
+    build:
+      context: .
+      dockerfile: Dockerfile.simulator
+    container_name: sms-simulator
+    command: python scripts/sms_simulator.py
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./scripts:/app/scripts
+    logging: *default-logging
+
+volumes:
+  mongo1_data:
+    driver: local
+  mongo2_data:
+    driver: local
+  mongo3_data:
+    driver: local
+  mongo1_config:
+    driver: local
+  mongo2_config:
+    driver: local
+  mongo3_config:
+    driver: local
+  mongocfg1_data:
+    driver: local
+  redis_data:
+    driver: local
+  mqtt_data:
+    driver: local
+  mqtt_log:
+    driver: local
+
+networks:
+  pipe-corridor-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

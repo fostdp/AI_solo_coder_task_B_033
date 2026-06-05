@@ -1,36 +1,91 @@
 import asyncio
 import json
+import sys
 import random
 import time
+import os
 import httpx
 from datetime import datetime
 from typing import Dict, List
 
 
 class LoRaGatewaySimulator:
-    def __init__(self, api_url: str = "http://localhost:8000/api", use_batch: bool = True, batch_size: int = 50):
-        self.api_url = api_url
-        self.interval = 60
-        self.env_sensor_count = 200
-        self.manhole_count = 100
+    def __init__(
+        self,
+        api_url: str = None,
+        use_batch: bool = None,
+        batch_size: int = None,
+        sensor_count: int = None,
+        manhole_count: int = None,
+        interval: int = None,
+        gas_config: Dict = None
+    ):
+        self.api_url = api_url or os.getenv("LORA_API_URL", "http://localhost:8000/api")
+        self.interval = interval or int(os.getenv("LORA_INTERVAL", "60"))
+        self.env_sensor_count = sensor_count or int(os.getenv("LORA_SENSOR_COUNT", "200"))
+        self.manhole_count = manhole_count or int(os.getenv("LORA_MANHOLE_COUNT", "100"))
+        self.use_batch = use_batch if use_batch is not None else os.getenv("LORA_USE_BATCH", "true").lower() == "true"
+        self.batch_size = batch_size or int(os.getenv("LORA_BATCH_SIZE", "50"))
+        
+        self.gas_config = gas_config or {
+            "methane": {
+                "min": float(os.getenv("LORA_METHANE_MIN", "0.0")),
+                "max": float(os.getenv("LORA_METHANE_MAX", "0.1")),
+                "alarm_min": float(os.getenv("LORA_METHANE_ALARM_MIN", "0.8")),
+                "alarm_max": float(os.getenv("LORA_METHANE_ALARM_MAX", "2.5"))
+            },
+            "hydrogen_sulfide": {
+                "min": float(os.getenv("LORA_H2S_MIN", "0.0")),
+                "max": float(os.getenv("LORA_H2S_MAX", "5.0")),
+                "alarm_min": float(os.getenv("LORA_H2S_ALARM_MIN", "8.0")),
+                "alarm_max": float(os.getenv("LORA_H2S_ALARM_MAX", "25.0"))
+            },
+            "oxygen": {
+                "min": float(os.getenv("LORA_OXYGEN_MIN", "19.5")),
+                "max": float(os.getenv("LORA_OXYGEN_MAX", "21.0")),
+                "drop_min": float(os.getenv("LORA_OXYGEN_DROP_MIN", "1.5")),
+                "drop_max": float(os.getenv("LORA_OXYGEN_DROP_MAX", "3.0"))
+            },
+            "temperature": {
+                "min": float(os.getenv("LORA_TEMP_MIN", "22.0")),
+                "max": float(os.getenv("LORA_TEMP_MAX", "28.0"))
+            },
+            "humidity": {
+                "min": float(os.getenv("LORA_HUMIDITY_MIN", "45.0")),
+                "max": float(os.getenv("LORA_HUMIDITY_MAX", "65.0"))
+            }
+        }
+        
+        self.anomaly_config = {
+            "methane_peak_prob": float(os.getenv("LORA_METHANE_PEAK_PROB", "0.02")),
+            "h2s_peak_prob": float(os.getenv("LORA_H2S_PEAK_PROB", "0.02")),
+            "oxygen_drop_prob": float(os.getenv("LORA_OXYGEN_DROP_PROB", "0.015")),
+            "peak_duration_min": int(os.getenv("LORA_PEAK_DURATION_MIN", "3")),
+            "peak_duration_max": int(os.getenv("LORA_PEAK_DURATION_MAX", "8")),
+            "drop_duration_min": int(os.getenv("LORA_DROP_DURATION_MIN", "5")),
+            "drop_duration_max": int(os.getenv("LORA_DROP_DURATION_MAX", "12")),
+            "manhole_open_prob": float(os.getenv("LORA_MANHOLE_OPEN_PROB", "0.01")),
+            "illegal_opening_prob": float(os.getenv("LORA_ILLEGAL_OPEN_PROB", "0.3"))
+        }
+        
         self.device_states: Dict[str, dict] = {}
-        self.use_batch = use_batch
-        self.batch_size = batch_size
         self._init_device_states()
 
     def _init_device_states(self):
         cabins = ["power", "water", "gas"]
+        env_per_cabin = self.env_sensor_count // 3
+        manhole_per_cabin = self.manhole_count // 3
 
         for i in range(self.env_sensor_count):
             device_id = f"ENV-{str(i+1).zfill(4)}"
-            cabin_idx = i // 67
+            cabin_idx = i // env_per_cabin
             cabin = cabins[min(cabin_idx, 2)]
 
-            base_temp = random.uniform(22, 28)
-            base_humidity = random.uniform(45, 65)
-            base_oxygen = random.uniform(19.5, 21.0)
-            base_methane = random.uniform(0.0, 0.05)
-            base_h2s = random.uniform(0.0, 3.0)
+            base_temp = random.uniform(self.gas_config["temperature"]["min"], self.gas_config["temperature"]["max"])
+            base_humidity = random.uniform(self.gas_config["humidity"]["min"], self.gas_config["humidity"]["max"])
+            base_oxygen = random.uniform(self.gas_config["oxygen"]["min"], self.gas_config["oxygen"]["max"])
+            base_methane = random.uniform(self.gas_config["methane"]["min"], self.gas_config["methane"]["max"])
+            base_h2s = random.uniform(self.gas_config["hydrogen_sulfide"]["min"], self.gas_config["hydrogen_sulfide"]["max"])
 
             self.device_states[device_id] = {
                 "type": "env_sensor",
@@ -51,7 +106,7 @@ class LoRaGatewaySimulator:
 
         for i in range(self.manhole_count):
             device_id = f"MH-{str(i+1).zfill(4)}"
-            cabin_idx = i // 34
+            cabin_idx = i // manhole_per_cabin
             cabin = cabins[min(cabin_idx, 2)]
 
             self.device_states[device_id] = {
@@ -66,6 +121,8 @@ class LoRaGatewaySimulator:
 
     def _generate_env_data(self, device_id: str, state: dict) -> dict:
         hour = datetime.now().hour
+        cfg = self.gas_config
+        anomaly = self.anomaly_config
 
         state["temp_variation"] += random.uniform(-0.3, 0.3)
         state["temp_variation"] = max(-3, min(3, state["temp_variation"]))
@@ -76,25 +133,25 @@ class LoRaGatewaySimulator:
         state["oxygen_variation"] += random.uniform(-0.05, 0.05)
         state["oxygen_variation"] = max(-2, min(1, state["oxygen_variation"]))
 
-        if random.random() < 0.02:
+        if random.random() < anomaly["methane_peak_prob"]:
             state["methane_peak"] = True
-            state["peak_duration"] = random.randint(3, 8)
+            state["peak_duration"] = random.randint(anomaly["peak_duration_min"], anomaly["peak_duration_max"])
         if state.get("peak_duration", 0) > 0:
             state["peak_duration"] -= 1
             if state["peak_duration"] <= 0:
                 state["methane_peak"] = False
 
-        if random.random() < 0.02:
+        if random.random() < anomaly["h2s_peak_prob"]:
             state["h2s_peak"] = True
-            state["h2s_duration"] = random.randint(3, 8)
+            state["h2s_duration"] = random.randint(anomaly["peak_duration_min"], anomaly["peak_duration_max"])
         if state.get("h2s_duration", 0) > 0:
             state["h2s_duration"] -= 1
             if state["h2s_duration"] <= 0:
                 state["h2s_peak"] = False
 
-        if random.random() < 0.015:
+        if random.random() < anomaly["oxygen_drop_prob"]:
             state["oxygen_drop"] = True
-            state["drop_duration"] = random.randint(5, 12)
+            state["drop_duration"] = random.randint(anomaly["drop_duration_min"], anomaly["drop_duration_max"])
         if state.get("drop_duration", 0) > 0:
             state["drop_duration"] -= 1
             if state["drop_duration"] <= 0:
@@ -111,16 +168,16 @@ class LoRaGatewaySimulator:
 
         oxygen = state["base_oxygen"] + state["oxygen_variation"]
         if state["oxygen_drop"]:
-            oxygen -= random.uniform(1.5, 3.0)
+            oxygen -= random.uniform(cfg["oxygen"]["drop_min"], cfg["oxygen"]["drop_max"])
         oxygen = max(16, min(23, oxygen))
 
         if state["methane_peak"]:
-            methane = random.uniform(0.8, 2.5)
+            methane = random.uniform(cfg["methane"]["alarm_min"], cfg["methane"]["alarm_max"])
         else:
             methane = max(0, state["base_methane"] + random.uniform(-0.02, 0.08))
 
         if state["h2s_peak"]:
-            h2s = random.uniform(8, 25)
+            h2s = random.uniform(cfg["hydrogen_sulfide"]["alarm_min"], cfg["hydrogen_sulfide"]["alarm_max"])
         else:
             h2s = max(0, state["base_h2s"] + random.uniform(-1, 2))
 
@@ -141,13 +198,14 @@ class LoRaGatewaySimulator:
 
     def _generate_manhole_data(self, device_id: str, state: dict) -> dict:
         now = time.time()
+        anomaly = self.anomaly_config
 
         if state["open_until"] > now:
             is_open = True
-        elif random.random() < 0.01:
+        elif random.random() < anomaly["manhole_open_prob"]:
             state["open_until"] = now + random.randint(60, 300)
             is_open = True
-            if random.random() < 0.3:
+            if random.random() < anomaly["illegal_opening_prob"]:
                 state["illegal_opening"] = True
                 state["is_legal"] = False
             else:
@@ -290,7 +348,7 @@ class LoRaGatewaySimulator:
         print(f"[LoRa] 上报完成，耗时: {elapsed:.2f}s")
 
     async def run_continuous(self):
-        print("=" * 60)
+        print("=" * 70)
         print("LoRa网关模拟器启动")
         print(f"API地址: {self.api_url}")
         print(f"环境传感器: {self.env_sensor_count} 个")
@@ -299,7 +357,19 @@ class LoRaGatewaySimulator:
         print(f"批量模式: {'启用' if self.use_batch else '禁用'}")
         if self.use_batch:
             print(f"批量大小: {self.batch_size} 条/批")
-        print("=" * 60)
+        print("-" * 70)
+        print("气体浓度配置:")
+        print(f"  氧气: {self.gas_config['oxygen']['min']}-{self.gas_config['oxygen']['max']}%")
+        print(f"  甲烷: {self.gas_config['methane']['min']}-{self.gas_config['methane']['max']}%")
+        print(f"  硫化氢: {self.gas_config['hydrogen_sulfide']['min']}-{self.gas_config['hydrogen_sulfide']['max']}ppm")
+        print(f"  温度: {self.gas_config['temperature']['min']}-{self.gas_config['temperature']['max']}°C")
+        print(f"  湿度: {self.gas_config['humidity']['min']}-{self.gas_config['humidity']['max']}%")
+        print("-" * 70)
+        print("异常模拟配置:")
+        print(f"  甲烷峰值概率: {self.anomaly_config['methane_peak_prob']*100:.1f}%")
+        print(f"  硫化氢峰值概率: {self.anomaly_config['h2s_peak_prob']*100:.1f}%")
+        print(f"  氧气下降概率: {self.anomaly_config['oxygen_drop_prob']*100:.1f}%")
+        print("=" * 70)
 
         while True:
             try:
@@ -310,22 +380,42 @@ class LoRaGatewaySimulator:
             sleep_time = max(0, self.interval - (time.time() % self.interval))
             await asyncio.sleep(sleep_time)
 
+    def print_config(self):
+        print("\n=== LoRa模拟器配置 ===")
+        print(f"传感器数量: {self.env_sensor_count}")
+        print(f"井盖数量: {self.manhole_count}")
+        print(f"上报间隔: {self.interval}s")
+        print(f"批量大小: {self.batch_size}")
+        print(f"气体配置: {json.dumps(self.gas_config, indent=4, ensure_ascii=False)}")
+        print("====================\n")
+
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="LoRa网关模拟器")
-    parser.add_argument("--api-url", default="http://localhost:8000/api", help="后端API地址")
+    parser = argparse.ArgumentParser(description="LoRa网关模拟器 - 支持环境变量配置")
+    parser.add_argument("--api-url", help="后端API地址", default=None)
     parser.add_argument("--once", action="store_true", help="只运行一次")
     parser.add_argument("--no-batch", action="store_true", help="禁用批量上报（逐条发送）")
-    parser.add_argument("--batch-size", type=int, default=50, help="批量大小（默认50）")
+    parser.add_argument("--batch-size", type=int, help="批量大小", default=None)
+    parser.add_argument("--sensor-count", type=int, help="环境传感器数量", default=None)
+    parser.add_argument("--manhole-count", type=int, help="井盖传感器数量", default=None)
+    parser.add_argument("--interval", type=int, help="上报间隔（秒）", default=None)
+    parser.add_argument("--print-config", action="store_true", help="打印当前配置并退出")
     args = parser.parse_args()
 
     simulator = LoRaGatewaySimulator(
         api_url=args.api_url,
-        use_batch=not args.no_batch,
-        batch_size=args.batch_size
+        use_batch=not args.no_batch if args.no_batch else None,
+        batch_size=args.batch_size,
+        sensor_count=args.sensor_count,
+        manhole_count=args.manhole_count,
+        interval=args.interval
     )
+
+    if args.print_config:
+        simulator.print_config()
+        sys.exit(0)
 
     if args.once:
         asyncio.run(simulator.run_once())
