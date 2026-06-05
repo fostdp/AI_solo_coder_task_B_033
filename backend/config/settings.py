@@ -4,13 +4,15 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     APP_NAME: str = "地下管廊综合监控系统"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "2.0.0"
     MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
-    MONGODB_DB: str = os.getenv("pipe_corridor")
+    MONGODB_DB: str = os.getenv("MONGODB_DB", "pipe_corridor")
     MQTT_BROKER: str = os.getenv("MQTT_BROKER", "localhost")
     MQTT_PORT: int = int(os.getenv("MQTT_PORT", 1883))
     MQTT_USERNAME: str = os.getenv("MQTT_USERNAME", "")
     MQTT_PASSWORD: str = os.getenv("MQTT_PASSWORD", "")
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    FUZZY_CONFIG_PATH: str = os.getenv("FUZZY_CONFIG_PATH", "config/fuzzy_logic.yaml")
     LORA_API_URL: str = os.getenv("LORA_API_URL", "http://localhost:8000")
     SMS_API_URL: str = os.getenv("SMS_API_URL", "http://localhost:8001/sms")
     OXYGEN_MIN: float = 19.0

@@ -67,6 +67,7 @@ echo.
 echo 前置要求（如未启动请先启动）：
 echo   1. MongoDB服务
 echo   2. MQTT Broker (端口1883)
+echo   3. Redis服务 (端口6379)
 echo.
 echo MongoDB初始化命令：
 echo   cd mongodb

@@ -6,6 +6,7 @@ from config.settings import settings
 from config.database import get_collection
 from models.models import Alarm, AlarmType, AlarmLevel, CabinType, EnvironmentData, ManholeData
 from utils.websocket import manager
+from utils.redis_client import redis_client, RedisChannels
 
 
 class AlarmManager:
@@ -15,6 +16,7 @@ class AlarmManager:
         self.sms_interval = timedelta(minutes=5)
         self.recent_alarm_keys: Set[str] = set()
         self.alarm_window = timedelta(seconds=30)
+        self._subscribed: bool = False
 
     def _get_alarm_key(self, device_id: str, alarm_type: str) -> str:
         return f"{device_id}:{alarm_type}"
@@ -131,18 +133,22 @@ class AlarmManager:
 
         self.active_alarms[alarm.id] = alarm
 
+        alarm_data = {
+            "id": alarm.id,
+            "alarm_type": alarm.alarm_type.value,
+            "level": alarm.level.value,
+            "device_id": alarm.device_id,
+            "cabin": alarm.cabin.value,
+            "message": alarm.message,
+            "timestamp": alarm.timestamp.isoformat()
+        }
+
         await manager.broadcast({
             "type": "alarm",
-            "data": {
-                "id": alarm.id,
-                "alarm_type": alarm.alarm_type.value,
-                "level": alarm.level.value,
-                "device_id": alarm.device_id,
-                "cabin": alarm.cabin.value,
-                "message": alarm.message,
-                "timestamp": alarm.timestamp.isoformat()
-            }
+            "data": alarm_data
         })
+
+        await redis_client.publish(RedisChannels.ALARM, alarm_data)
 
         if alarm.alarm_type == AlarmType.SUFFOCATION:
             alarm_key = self._get_alarm_key(alarm.device_id, alarm.alarm_type)
@@ -153,6 +159,51 @@ class AlarmManager:
                 print(f"[告警系统] 短信已触发 (二级窒息告警): {alarm.message}")
         else:
             print(f"[告警系统] WebSocket推送 (一级/其他告警，不发短信): {alarm.level.value} - {alarm.message}")
+
+    async def _handle_env_data(self, data: dict):
+        try:
+            from datetime import datetime as dt
+            env_data = EnvironmentData(
+                device_id=data.get('device_id', ''),
+                cabin=CabinType(data.get('cabin', 'power')),
+                timestamp=dt.fromisoformat(data.get('timestamp', dt.utcnow().isoformat())),
+                temperature=data.get('temperature', 25.0),
+                humidity=data.get('humidity', 50.0),
+                oxygen=data.get('oxygen', 20.0),
+                methane=data.get('methane', 0.0),
+                hydrogen_sulfide=data.get('hydrogen_sulfide', 0.0),
+                rssi=data.get('rssi')
+            )
+            await self.check_environment_data(env_data)
+        except Exception as e:
+            print(f"[告警系统] 处理环境数据失败: {e}")
+
+    async def _handle_manhole_data(self, data: dict):
+        try:
+            from datetime import datetime as dt
+            manhole_data = ManholeData(
+                device_id=data.get('device_id', ''),
+                cabin=CabinType(data.get('cabin', 'power')),
+                timestamp=dt.fromisoformat(data.get('timestamp', dt.utcnow().isoformat())),
+                is_open=data.get('is_open', False),
+                is_legal=data.get('is_legal', True),
+                battery_level=data.get('battery_level'),
+                rssi=data.get('rssi')
+            )
+            await self.check_manhole_data(manhole_data)
+        except Exception as e:
+            print(f"[告警系统] 处理井盖数据失败: {e}")
+
+    async def start_subscription(self):
+        if self._subscribed:
+            return
+        try:
+            await redis_client.subscribe(RedisChannels.ENV_DATA, self._handle_env_data)
+            await redis_client.subscribe(RedisChannels.MANHOLE_DATA, self._handle_manhole_data)
+            self._subscribed = True
+            print("[告警系统] Redis订阅已启动")
+        except Exception as e:
+            print(f"[告警系统] Redis订阅失败: {e}")
 
     async def acknowledge_alarm(self, alarm_id: str, user: str) -> bool:
         result = await get_collection("alarms").update_one(

@@ -109,7 +109,7 @@ const WebSocketModule = {
     _handleDeviceUpdate(deviceData) {
         console.log('[WebSocket] 收到设备更新:', deviceData);
 
-        MapModule.updateDeviceStatus(
+        CorridorMapModule.updateDeviceStatus(
             deviceData.device_id,
             deviceData.status,
             deviceData.data

@@ -6,6 +6,7 @@ import paho.mqtt.client as mqtt
 from config.settings import settings
 from config.database import get_collection
 from models.models import FanData, PumpData
+from utils.redis_client import redis_client, RedisChannels
 
 
 class MQTTClient:
@@ -57,6 +58,13 @@ class MQTTClient:
                     {"device_id": device_id},
                     {"$set": {"last_update": datetime.utcnow(), "status": data.is_running}}
                 )
+                await redis_client.publish(RedisChannels.FAN_DATA, {
+                    "device_id": device_id,
+                    "cabin": payload.get("cabin", "power"),
+                    "is_running": payload.get("is_running", False),
+                    "speed": payload.get("speed", 0),
+                    "timestamp": datetime.utcnow().isoformat()
+                })
             elif device_type == "pump":
                 data = PumpData(
                     device_id=device_id,
@@ -71,6 +79,14 @@ class MQTTClient:
                     {"device_id": device_id},
                     {"$set": {"last_update": datetime.utcnow()}}
                 )
+                await redis_client.publish(RedisChannels.PUMP_DATA, {
+                    "device_id": device_id,
+                    "cabin": payload.get("cabin", "water"),
+                    "is_running": payload.get("is_running", False),
+                    "level": payload.get("level", 0.0),
+                    "flow_rate": payload.get("flow_rate"),
+                    "timestamp": datetime.utcnow().isoformat()
+                })
         except Exception as e:
             print(f"存储MQTT数据错误: {e}")
 
