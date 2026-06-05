@@ -36,6 +36,12 @@ class EnvironmentData(BaseModel):
     rssi: Optional[int] = None
 
 
+class EnvironmentDataBatch(BaseModel):
+    data: List[EnvironmentData]
+    gateway_id: Optional[str] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
 class ManholeData(BaseModel):
     device_id: str
     cabin: CabinType
@@ -43,6 +49,12 @@ class ManholeData(BaseModel):
     is_open: bool
     is_legal: bool = True
     battery_level: Optional[float] = None
+
+
+class ManholeDataBatch(BaseModel):
+    data: List[ManholeData]
+    gateway_id: Optional[str] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
 class FanData(BaseModel):

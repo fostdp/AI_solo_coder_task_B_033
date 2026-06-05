@@ -1,11 +1,14 @@
+import asyncio
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 from bson import ObjectId
 
 from config.database import get_collection
 from models.models import (
-    EnvironmentData, ManholeData, FanData, PumpData,
+    EnvironmentData, EnvironmentDataBatch,
+    ManholeData, ManholeDataBatch,
+    FanData, PumpData,
     Device, DeviceStatus, Alarm, CabinType, DeviceType,
     OperationHistory
 )
@@ -29,108 +32,201 @@ async def root():
     }
 
 
+def _get_env_device_status(data: EnvironmentData) -> DeviceStatus:
+    if data.oxygen < 18 or data.methane >= 1 or data.hydrogen_sulfide >= 10 or data.temperature >= 35:
+        return DeviceStatus.FAULT
+    elif data.oxygen < 18.5 or data.methane > 0.8 or data.hydrogen_sulfide > 8 or data.temperature > 33:
+        return DeviceStatus.WARNING
+    else:
+        return DeviceStatus.NORMAL
+
+
+def _get_manhole_device_status(data: ManholeData) -> DeviceStatus:
+    if data.is_open and not data.is_legal:
+        return DeviceStatus.FAULT
+    elif data.battery_level is not None and data.battery_level < 20:
+        return DeviceStatus.WARNING
+    else:
+        return DeviceStatus.NORMAL
+
+
+async def _process_single_env_data(data: EnvironmentData) -> Tuple[DeviceStatus, Dict]:
+    await get_collection("environment_data").insert_one(data.dict())
+
+    device_status = _get_env_device_status(data)
+
+    await get_collection("devices").update_one(
+        {"device_id": data.device_id},
+        {"$set": {
+            "last_update": data.timestamp,
+            "status": device_status.value
+        }},
+        upsert=True
+    )
+
+    await alarm_manager.check_environment_data(data)
+
+    asyncio.create_task(
+        ventilation_controller.process_sensor_data(
+            data.cabin, data.oxygen, data.temperature, data.humidity
+        )
+    )
+
+    return device_status, {
+        "temperature": data.temperature,
+        "humidity": data.humidity,
+        "oxygen": data.oxygen,
+        "methane": data.methane,
+        "hydrogen_sulfide": data.hydrogen_sulfide
+    }
+
+
 @router.post("/data/lora")
 async def receive_lora_data(data: EnvironmentData):
     try:
-        data_dict = data.dict()
-        await get_collection("environment_data").insert_one(data_dict)
-
-        device_updates = {
-            "last_update": data.timestamp
-        }
-
-        if data.oxygen < 18.5 or data.methane > 0.8 or data.hydrogen_sulfide > 8 or data.temperature > 33:
-            device_updates["status"] = DeviceStatus.WARNING
-        elif data.oxygen < 18 or data.methane >= 1 or data.hydrogen_sulfide >= 10 or data.temperature >= 35:
-            device_updates["status"] = DeviceStatus.FAULT
-        else:
-            device_updates["status"] = DeviceStatus.NORMAL
-
-        await get_collection("devices").update_one(
-            {"device_id": data.device_id},
-            {"$set": device_updates},
-            upsert=True
-        )
-
-        await alarm_manager.check_environment_data(data)
-
-        cabin_fans = await get_collection("devices").find({
-            "type": DeviceType.FAN,
-            "cabin": data.cabin
-        }).to_list(length=None)
-
-        should_run, speed = ventilation_controller.calculate(
-            data.oxygen, data.temperature, data.humidity
-        )
-
-        for fan in cabin_fans:
-            current_state = ventilation_controller.get_fan_state(fan["device_id"])
-            if should_run != current_state["is_running"] or abs(speed - current_state.get("speed", 0)) > 10:
-                command = "start" if should_run else "stop"
-                mqtt_client.send_fan_command(fan["device_id"], command, speed if should_run else 0)
-                ventilation_controller.update_fan_state(fan["device_id"], should_run, speed if should_run else 0)
-
-                op_history = OperationHistory(
-                    device_id=fan["device_id"],
-                    operation=f"fan_auto_{command}",
-                    operator="ventilation_system",
-                    parameters={
-                        "speed": speed if should_run else 0,
-                        "reason": "environmental_control",
-                        "oxygen": data.oxygen,
-                        "temperature": data.temperature,
-                        "humidity": data.humidity
-                    }
-                )
-                await get_collection("operation_history").insert_one(op_history.dict())
+        start_time = datetime.utcnow()
+        device_status, sensor_data = await _process_single_env_data(data)
+        process_time = (datetime.utcnow() - start_time).total_seconds() * 1000
 
         await manager.broadcast_device_update({
             "device_id": data.device_id,
             "type": "env_sensor",
-            "status": device_updates["status"].value,
-            "data": {
-                "temperature": data.temperature,
-                "humidity": data.humidity,
-                "oxygen": data.oxygen,
-                "methane": data.methane,
-                "hydrogen_sulfide": data.hydrogen_sulfide
-            }
+            "status": device_status.value,
+            "data": sensor_data,
+            "process_time_ms": process_time
         })
 
-        return {"status": "success", "message": "数据接收成功"}
+        return {
+            "status": "success",
+            "message": "数据接收成功",
+            "process_time_ms": process_time
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/data/lora/batch")
+async def receive_lora_data_batch(batch: EnvironmentDataBatch):
+    try:
+        start_time = datetime.utcnow()
+        env_collection = get_collection("environment_data")
+        devices_collection = get_collection("devices")
+
+        if not batch.data:
+            return {"status": "success", "count": 0, "message": "空批次"}
+
+        data_dicts = [d.dict() for d in batch.data]
+        await env_collection.insert_many(data_dicts, ordered=False)
+
+        device_updates = []
+        broadcast_tasks = []
+        cabin_avg_data: Dict[str, Dict] = {}
+
+        for data in batch.data:
+            device_status = _get_env_device_status(data)
+
+            device_updates.append({
+                "update_one": {
+                    "filter": {"device_id": data.device_id},
+                    "update": {
+                        "$set": {
+                            "last_update": data.timestamp,
+                            "status": device_status.value
+                        }
+                    },
+                    "upsert": True
+                }
+            })
+
+            cabin = data.cabin.value
+            if cabin not in cabin_avg_data:
+                cabin_avg_data[cabin] = {
+                    "count": 0,
+                    "oxygen_sum": 0,
+                    "temperature_sum": 0,
+                    "humidity_sum": 0
+                }
+            cabin_avg_data[cabin]["count"] += 1
+            cabin_avg_data[cabin]["oxygen_sum"] += data.oxygen
+            cabin_avg_data[cabin]["temperature_sum"] += data.temperature
+            cabin_avg_data[cabin]["humidity_sum"] += data.humidity
+
+            broadcast_tasks.append(
+                manager.broadcast_device_update({
+                    "device_id": data.device_id,
+                    "type": "env_sensor",
+                    "status": device_status.value,
+                    "data": {
+                        "temperature": data.temperature,
+                        "humidity": data.humidity,
+                        "oxygen": data.oxygen,
+                        "methane": data.methane,
+                        "hydrogen_sulfide": data.hydrogen_sulfide
+                    }
+                })
+            )
+
+        if device_updates:
+            await devices_collection.bulk_write(device_updates, ordered=False)
+
+        alarm_tasks = [alarm_manager.check_environment_data(d) for d in batch.data]
+        await asyncio.gather(*alarm_tasks)
+
+        for cabin, avg_data in cabin_avg_data.items():
+            count = avg_data["count"]
+            avg_oxygen = avg_data["oxygen_sum"] / count
+            avg_temperature = avg_data["temperature_sum"] / count
+            avg_humidity = avg_data["humidity_sum"] / count
+
+            asyncio.create_task(
+                ventilation_controller.process_sensor_data(
+                    CabinType(cabin), avg_oxygen, avg_temperature, avg_humidity
+                )
+            )
+
+        if broadcast_tasks:
+            await asyncio.gather(*broadcast_tasks)
+
+        process_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+
+        return {
+            "status": "success",
+            "count": len(batch.data),
+            "process_time_ms": process_time,
+            "throughput": round(len(batch.data) / (process_time / 1000), 2) if process_time > 0 else 0
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _process_single_manhole_data(data: ManholeData) -> DeviceStatus:
+    await get_collection("manhole_data").insert_one(data.dict())
+
+    device_status = _get_manhole_device_status(data)
+
+    await get_collection("devices").update_one(
+        {"device_id": data.device_id},
+        {"$set": {
+            "last_update": data.timestamp,
+            "status": device_status.value
+        }},
+        upsert=True
+    )
+
+    await alarm_manager.check_manhole_data(data)
+
+    return device_status
 
 
 @router.post("/data/manhole")
 async def receive_manhole_data(data: ManholeData):
     try:
-        data_dict = data.dict()
-        await get_collection("manhole_data").insert_one(data_dict)
-
-        device_updates = {
-            "last_update": data.timestamp
-        }
-
-        if data.is_open and not data.is_legal:
-            device_updates["status"] = DeviceStatus.FAULT
-        elif data.battery_level is not None and data.battery_level < 20:
-            device_updates["status"] = DeviceStatus.WARNING
-        else:
-            device_updates["status"] = DeviceStatus.NORMAL
-
-        await get_collection("devices").update_one(
-            {"device_id": data.device_id},
-            {"$set": device_updates},
-            upsert=True
-        )
-
-        await alarm_manager.check_manhole_data(data)
+        device_status = await _process_single_manhole_data(data)
 
         await manager.broadcast_device_update({
             "device_id": data.device_id,
             "type": "manhole",
-            "status": device_updates["status"].value,
+            "status": device_status.value,
             "data": {
                 "is_open": data.is_open,
                 "is_legal": data.is_legal
@@ -138,6 +234,71 @@ async def receive_manhole_data(data: ManholeData):
         })
 
         return {"status": "success", "message": "井盖数据接收成功"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/data/manhole/batch")
+async def receive_manhole_data_batch(batch: ManholeDataBatch):
+    try:
+        start_time = datetime.utcnow()
+        manhole_collection = get_collection("manhole_data")
+        devices_collection = get_collection("devices")
+
+        if not batch.data:
+            return {"status": "success", "count": 0, "message": "空批次"}
+
+        data_dicts = [d.dict() for d in batch.data]
+        await manhole_collection.insert_many(data_dicts, ordered=False)
+
+        device_updates = []
+        broadcast_tasks = []
+
+        for data in batch.data:
+            device_status = _get_manhole_device_status(data)
+
+            device_updates.append({
+                "update_one": {
+                    "filter": {"device_id": data.device_id},
+                    "update": {
+                        "$set": {
+                            "last_update": data.timestamp,
+                            "status": device_status.value
+                        }
+                    },
+                    "upsert": True
+                }
+            })
+
+            broadcast_tasks.append(
+                manager.broadcast_device_update({
+                    "device_id": data.device_id,
+                    "type": "manhole",
+                    "status": device_status.value,
+                    "data": {
+                        "is_open": data.is_open,
+                        "is_legal": data.is_legal
+                    }
+                })
+            )
+
+        if device_updates:
+            await devices_collection.bulk_write(device_updates, ordered=False)
+
+        alarm_tasks = [alarm_manager.check_manhole_data(d) for d in batch.data]
+        await asyncio.gather(*alarm_tasks)
+
+        if broadcast_tasks:
+            await asyncio.gather(*broadcast_tasks)
+
+        process_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+
+        return {
+            "status": "success",
+            "count": len(batch.data),
+            "process_time_ms": process_time,
+            "throughput": round(len(batch.data) / (process_time / 1000), 2) if process_time > 0 else 0
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -279,6 +440,8 @@ async def control_device(
     if device_type == "fan":
         speed = command.get("speed", 50)
         mqtt_client.send_fan_command(device_id, cmd, speed)
+        is_running = cmd == "start"
+        ventilation_controller.update_fan_state(device_id, device.cabin, is_running, speed if is_running else 0)
     elif device_type == "pump":
         pump_controller.manual_control(device_id, cmd, operator)
     else:

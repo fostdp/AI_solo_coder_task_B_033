@@ -144,14 +144,15 @@ class AlarmManager:
             }
         })
 
-        if alarm.level in [AlarmLevel.CRITICAL, AlarmLevel.WARNING]:
+        if alarm.alarm_type == AlarmType.SUFFOCATION:
             alarm_key = self._get_alarm_key(alarm.device_id, alarm.alarm_type)
             last_sent = self.sms_cooldown.get(alarm_key)
             if last_sent is None or datetime.utcnow() - last_sent > self.sms_interval:
                 asyncio.create_task(self._send_sms(alarm))
                 self.sms_cooldown[alarm_key] = datetime.utcnow()
-
-        print(f"[告警系统] 产生告警: {alarm.level.value} - {alarm.message}")
+                print(f"[告警系统] 短信已触发 (二级窒息告警): {alarm.message}")
+        else:
+            print(f"[告警系统] WebSocket推送 (一级/其他告警，不发短信): {alarm.level.value} - {alarm.message}")
 
     async def acknowledge_alarm(self, alarm_id: str, user: str) -> bool:
         result = await get_collection("alarms").update_one(

@@ -8,12 +8,14 @@ from typing import Dict, List
 
 
 class LoRaGatewaySimulator:
-    def __init__(self, api_url: str = "http://localhost:8000/api"):
+    def __init__(self, api_url: str = "http://localhost:8000/api", use_batch: bool = True, batch_size: int = 50):
         self.api_url = api_url
         self.interval = 60
         self.env_sensor_count = 200
         self.manhole_count = 100
         self.device_states: Dict[str, dict] = {}
+        self.use_batch = use_batch
+        self.batch_size = batch_size
         self._init_device_states()
 
     def _init_device_states(self):
@@ -184,20 +186,62 @@ class LoRaGatewaySimulator:
             print(f"[LoRa] 发送数据异常: {e}")
             return False
 
+    async def _send_batch(self, endpoint: str, items: List[dict]) -> dict:
+        try:
+            batch_data = {
+                "data": items,
+                "gateway_id": "GW-001",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{self.api_url}/{endpoint}/batch",
+                    json=batch_data
+                )
+                if response.status_code != 200:
+                    print(f"[LoRa] 批量发送失败 ({endpoint}): {response.status_code} - {response.text}")
+                    return {"success": False, "count": 0, "error": response.text}
+                result = response.json()
+                return {"success": True, "count": result.get("count", 0), "process_time_ms": result.get("process_time_ms", 0), "throughput": result.get("throughput", 0)}
+        except Exception as e:
+            print(f"[LoRa] 批量发送异常: {e}")
+            return {"success": False, "count": 0, "error": str(e)}
+
     async def _send_batch_env_data(self):
         env_devices = [
             (did, state) for did, state in self.device_states.items()
             if state["type"] == "env_sensor"
         ]
 
-        success_count = 0
-        for device_id, state in env_devices:
-            data = self._generate_env_data(device_id, state)
-            if await self._send_data("data/lora", data):
-                success_count += 1
-            await asyncio.sleep(0.02)
+        if self.use_batch:
+            all_data = []
+            for device_id, state in env_devices:
+                data = self._generate_env_data(device_id, state)
+                all_data.append(data)
 
-        print(f"[LoRa] 环境传感器数据上报完成: {success_count}/{len(env_devices)} 成功")
+            success_count = 0
+            total_time = 0
+            total_throughput = 0
+
+            for i in range(0, len(all_data), self.batch_size):
+                batch = all_data[i:i + self.batch_size]
+                result = await self._send_batch("data/lora", batch)
+                if result["success"]:
+                    success_count += result["count"]
+                    total_time += result["process_time_ms"]
+                    total_throughput += result["throughput"]
+                await asyncio.sleep(0.1)
+
+            print(f"[LoRa] 环境传感器批量上报完成: {success_count}/{len(env_devices)} 成功, 总耗时: {total_time:.0f}ms, 吞吐: {total_throughput:.0f}条/s")
+        else:
+            success_count = 0
+            for device_id, state in env_devices:
+                data = self._generate_env_data(device_id, state)
+                if await self._send_data("data/lora", data):
+                    success_count += 1
+                await asyncio.sleep(0.02)
+
+            print(f"[LoRa] 环境传感器数据上报完成: {success_count}/{len(env_devices)} 成功")
 
     async def _send_batch_manhole_data(self):
         manhole_devices = [
@@ -205,14 +249,33 @@ class LoRaGatewaySimulator:
             if state["type"] == "manhole"
         ]
 
-        success_count = 0
-        for device_id, state in manhole_devices:
-            data = self._generate_manhole_data(device_id, state)
-            if await self._send_data("data/manhole", data):
-                success_count += 1
-            await asyncio.sleep(0.02)
+        if self.use_batch:
+            all_data = []
+            for device_id, state in manhole_devices:
+                data = self._generate_manhole_data(device_id, state)
+                all_data.append(data)
 
-        print(f"[LoRa] 井盖传感器数据上报完成: {success_count}/{len(manhole_devices)} 成功")
+            success_count = 0
+            total_time = 0
+
+            for i in range(0, len(all_data), self.batch_size):
+                batch = all_data[i:i + self.batch_size]
+                result = await self._send_batch("data/manhole", batch)
+                if result["success"]:
+                    success_count += result["count"]
+                    total_time += result["process_time_ms"]
+                await asyncio.sleep(0.1)
+
+            print(f"[LoRa] 井盖传感器批量上报完成: {success_count}/{len(manhole_devices)} 成功, 总耗时: {total_time:.0f}ms")
+        else:
+            success_count = 0
+            for device_id, state in manhole_devices:
+                data = self._generate_manhole_data(device_id, state)
+                if await self._send_data("data/manhole", data):
+                    success_count += 1
+                await asyncio.sleep(0.02)
+
+            print(f"[LoRa] 井盖传感器数据上报完成: {success_count}/{len(manhole_devices)} 成功")
 
     async def run_once(self):
         print(f"\n[LoRa] 开始数据上报 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -233,6 +296,9 @@ class LoRaGatewaySimulator:
         print(f"环境传感器: {self.env_sensor_count} 个")
         print(f"井盖传感器: {self.manhole_count} 个")
         print(f"上报间隔: {self.interval} 秒")
+        print(f"批量模式: {'启用' if self.use_batch else '禁用'}")
+        if self.use_batch:
+            print(f"批量大小: {self.batch_size} 条/批")
         print("=" * 60)
 
         while True:
@@ -251,9 +317,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LoRa网关模拟器")
     parser.add_argument("--api-url", default="http://localhost:8000/api", help="后端API地址")
     parser.add_argument("--once", action="store_true", help="只运行一次")
+    parser.add_argument("--no-batch", action="store_true", help="禁用批量上报（逐条发送）")
+    parser.add_argument("--batch-size", type=int, default=50, help="批量大小（默认50）")
     args = parser.parse_args()
 
-    simulator = LoRaGatewaySimulator(api_url=args.api_url)
+    simulator = LoRaGatewaySimulator(
+        api_url=args.api_url,
+        use_batch=not args.no_batch,
+        batch_size=args.batch_size
+    )
 
     if args.once:
         asyncio.run(simulator.run_once())

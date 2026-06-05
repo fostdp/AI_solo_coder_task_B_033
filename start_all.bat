@@ -45,8 +45,8 @@ echo 正在启动后端API服务...
 start "后端API服务" cmd /k "cd /d "%~dp0backend" && python main.py"
 timeout /t 3 >nul
 
-echo 正在启动LoRa网关模拟器...
-start "LoRa网关模拟器" cmd /k "cd /d "%~dp0scripts" && python lora_gateway_simulator.py"
+echo 正在启动LoRa网关模拟器 (批量模式)...
+start "LoRa网关模拟器" cmd /k "cd /d "%~dp0scripts" && python lora_gateway_simulator.py --batch-size 50"
 timeout /t 2 >nul
 
 echo.

@@ -1,14 +1,41 @@
 import time
-from typing import Tuple, Dict
+import asyncio
+from typing import Tuple, Dict, List, Optional
 from config.settings import settings
-from models.models import CabinType
+from models.models import CabinType, OperationHistory
+from utils.mqtt_client import mqtt_client
+from config.database import get_collection
 
 
-class FuzzyVentilationController:
-    def __init__(self):
+class CabinVentilationController:
+    def __init__(self, cabin: CabinType):
+        self.cabin = cabin
         self.oxygen_target = (settings.OXYGEN_MIN + settings.OXYGEN_MAX) / 2
         self.temp_max = settings.TEMP_MAX
         self.fan_states: Dict[str, dict] = {}
+        self.last_inference_time: float = 0
+        self.throttle_interval: float = 5.0
+        self.cached_result: Optional[Tuple[bool, int]] = None
+        self.pid_integral: float = 0.0
+        self.pid_prev_error: float = 0.0
+        self.pid_prev_time: float = time.time()
+        self.sensor_readings: List[dict] = []
+        self.max_readings: int = 10
+        self.fan_device_ids: List[str] = []
+        self._initialized: bool = False
+
+    async def _init_fan_devices(self):
+        if self._initialized:
+            return
+        try:
+            fans = await get_collection("devices").find({
+                "type": "fan",
+                "cabin": self.cabin.value
+            }).to_list(length=20)
+            self.fan_device_ids = [f["device_id"] for f in fans]
+            self._initialized = True
+        except Exception as e:
+            print(f"[通风控制 {self.cabin.value}] 初始化风机列表失败: {e}")
 
     def _fuzzify_oxygen(self, oxygen: float) -> str:
         if oxygen < 17.0:
@@ -126,11 +153,85 @@ class FuzzyVentilationController:
             return (True, 40)
         return (False, 0)
 
-    def calculate(self, oxygen: float, temperature: float, humidity: float) -> Tuple[bool, int]:
+    def _calculate_fuzzy(self, oxygen: float, temperature: float, humidity: float) -> Tuple[bool, int]:
         oxy_level = self._fuzzify_oxygen(oxygen)
         temp_level = self._fuzzify_temperature(temperature)
         hum_level = self._fuzzify_humidity(humidity)
         return self._infer(oxy_level, temp_level, hum_level)
+
+    def _add_reading(self, oxygen: float, temperature: float, humidity: float):
+        self.sensor_readings.append({
+            "oxygen": oxygen,
+            "temperature": temperature,
+            "humidity": humidity,
+            "time": time.time()
+        })
+        if len(self.sensor_readings) > self.max_readings:
+            self.sensor_readings.pop(0)
+
+    def _get_average_readings(self) -> Tuple[float, float, float]:
+        if not self.sensor_readings:
+            return (20.0, 25.0, 50.0)
+        count = len(self.sensor_readings)
+        avg_oxy = sum(r["oxygen"] for r in self.sensor_readings) / count
+        avg_temp = sum(r["temperature"] for r in self.sensor_readings) / count
+        avg_hum = sum(r["humidity"] for r in self.sensor_readings) / count
+        return (avg_oxy, avg_temp, avg_hum)
+
+    async def process_sensor_data(self, oxygen: float, temperature: float, humidity: float) -> Optional[Tuple[bool, int]]:
+        await self._init_fan_devices()
+
+        self._add_reading(oxygen, temperature, humidity)
+
+        now = time.time()
+        if now - self.last_inference_time < self.throttle_interval:
+            return self.cached_result
+
+        avg_oxy, avg_temp, avg_hum = self._get_average_readings()
+
+        start_time = time.time()
+        should_run, speed = self._calculate_fuzzy(avg_oxy, avg_temp, avg_hum)
+        inference_time = (time.time() - start_time) * 1000
+
+        self.last_inference_time = now
+        self.cached_result = (should_run, speed)
+
+        asyncio.create_task(self._apply_control(should_run, speed, avg_oxy, avg_temp, avg_hum))
+
+        print(f"[通风控制 {self.cabin.value}] 推理完成: 运行={should_run}, 转速={speed}%, 耗时={inference_time:.2f}ms, 风机数={len(self.fan_device_ids)}")
+
+        return (should_run, speed)
+
+    async def _apply_control(self, should_run: bool, speed: int, oxygen: float, temperature: float, humidity: float):
+        try:
+            op_histories = []
+            for device_id in self.fan_device_ids:
+                current_state = self.get_fan_state(device_id)
+                if should_run != current_state["is_running"] or abs(speed - current_state.get("speed", 0)) > 10:
+                    command = "start" if should_run else "stop"
+                    mqtt_client.send_fan_command(device_id, command, speed if should_run else 0)
+                    self.update_fan_state(device_id, should_run, speed if should_run else 0)
+
+                    op_histories.append(OperationHistory(
+                        device_id=device_id,
+                        operation=f"fan_auto_{command}",
+                        operator="ventilation_system",
+                        parameters={
+                            "speed": speed if should_run else 0,
+                            "reason": "environmental_control",
+                            "oxygen": oxygen,
+                            "temperature": temperature,
+                            "humidity": humidity,
+                            "cabin": self.cabin.value
+                        }
+                    ).dict())
+
+            if op_histories:
+                await get_collection("operation_history").insert_many(op_histories)
+                print(f"[通风控制 {self.cabin.value}] 已向 {len(op_histories)} 台风机发送控制指令")
+
+        except Exception as e:
+            print(f"[通风控制 {self.cabin.value}] 应用控制指令失败: {e}")
 
     def update_fan_state(self, device_id: str, is_running: bool, speed: int):
         self.fan_states[device_id] = {
@@ -143,47 +244,29 @@ class FuzzyVentilationController:
         return self.fan_states.get(device_id, {"is_running": False, "speed": 0})
 
 
-class PIDVentilationController:
+class VentilationControllerManager:
     def __init__(self):
-        self.oxygen_target = (settings.OXYGEN_MIN + settings.OXYGEN_MAX) / 2
-        self.temp_target = 28.0
-        self.temp_max = settings.TEMP_MAX
-        self.kp = 2.5
-        self.ki = 0.1
-        self.kd = 0.5
-        self.integral = 0.0
-        self.prev_error = 0.0
-        self.prev_time = time.time()
+        self.cabin_controllers: Dict[str, CabinVentilationController] = {
+            CabinType.POWER.value: CabinVentilationController(CabinType.POWER),
+            CabinType.WATER.value: CabinVentilationController(CabinType.WATER),
+            CabinType.GAS.value: CabinVentilationController(CabinType.GAS),
+        }
 
-    def calculate(self, oxygen: float, temperature: float, humidity: float) -> Tuple[bool, int]:
-        current_time = time.time()
-        dt = current_time - self.prev_time
-        if dt <= 0:
-            dt = 1.0
+    def get_controller(self, cabin: CabinType) -> CabinVentilationController:
+        return self.cabin_controllers[cabin.value]
 
-        oxy_error = self.oxygen_target - oxygen
-        temp_excess = max(0, temperature - self.temp_max)
+    async def process_sensor_data(self, cabin: CabinType, oxygen: float, temperature: float, humidity: float):
+        controller = self.get_controller(cabin)
+        return await controller.process_sensor_data(oxygen, temperature, humidity)
 
-        combined_error = oxy_error * 0.7 + temp_excess * 0.3
+    def update_fan_state(self, device_id: str, cabin: CabinType, is_running: bool, speed: int):
+        controller = self.get_controller(cabin)
+        controller.update_fan_state(device_id, is_running, speed)
 
-        self.integral += combined_error * dt
-        self.integral = max(-50, min(50, self.integral))
-
-        derivative = (combined_error - self.prev_error) / dt
-
-        output = self.kp * combined_error + self.ki * self.integral + self.kd * derivative
-
-        self.prev_error = combined_error
-        self.prev_time = current_time
-
-        if output > 5:
-            speed = int(min(100, output * 2 + 30))
-            return (True, speed)
-        elif temperature > self.temp_max:
-            return (True, 50)
-        else:
-            self.integral = max(0, self.integral)
-            return (False, 0)
+    def get_fan_state(self, device_id: str, cabin: CabinType) -> dict:
+        controller = self.get_controller(cabin)
+        return controller.get_fan_state(device_id)
 
 
-ventilation_controller = FuzzyVentilationController()
+ventilation_controller = VentilationControllerManager()
+
