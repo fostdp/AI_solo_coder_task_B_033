@@ -1,0 +1,216 @@
+ventilation_control:
+  name: "地下管廊通风模糊控制器"
+  version: "1.0.0"
+  
+  input_variables:
+    oxygen:
+      name: "氧气浓度"
+      unit: "%"
+      range: [0, 25]
+      membership_functions:
+        very_low:
+          type: "trapezoid"
+          params: [0, 0, 17, 18]
+        low:
+          type: "trapezoid"
+          params: [17, 18, 18.5, 19]
+        normal:
+          type: "trapezoid"
+          params: [18.5, 19, 21, 21.5]
+        high:
+          type: "trapezoid"
+          params: [21, 21.5, 23, 25]
+    
+    temperature:
+      name: "温度"
+      unit: "°C"
+      range: [0, 50]
+      membership_functions:
+        low:
+          type: "trapezoid"
+          params: [0, 0, 18, 22]
+        normal:
+          type: "trapezoid"
+          params: [18, 22, 28, 32]
+        high:
+          type: "trapezoid"
+          params: [28, 32, 35, 40]
+        very_high:
+          type: "trapezoid"
+          params: [35, 40, 50, 50]
+    
+    humidity:
+      name: "湿度"
+      unit: "%"
+      range: [0, 100]
+      membership_functions:
+        dry:
+          type: "trapezoid"
+          params: [0, 0, 30, 40]
+        normal:
+          type: "trapezoid"
+          params: [30, 40, 70, 80]
+        humid:
+          type: "trapezoid"
+          params: [70, 80, 100, 100]
+
+  output_variable:
+    fan_speed:
+      name: "风机转速"
+      unit: "%"
+      range: [0, 100]
+      membership_functions:
+        stop:
+          type: "singleton"
+          params: [0]
+        low:
+          type: "singleton"
+          params: [30]
+        medium:
+          type: "singleton"
+          params: [60]
+        high:
+          type: "singleton"
+          params: [85]
+        full:
+          type: "singleton"
+          params: [100]
+
+  rule_base:
+    - id: 1
+      condition:
+        oxygen: "very_low"
+      action:
+        fan_speed: "full"
+      weight: 1.0
+      description: "氧气浓度极低，风机全速运行"
+    
+    - id: 2
+      condition:
+        oxygen: "low"
+      action:
+        fan_speed: "high"
+      weight: 1.0
+      description: "氧气浓度偏低，风机高速运行"
+    
+    - id: 3
+      condition:
+        oxygen: "normal"
+        temperature: "low"
+      action:
+        fan_speed: "stop"
+      weight: 0.8
+      description: "氧气正常且温度低，停止风机"
+    
+    - id: 4
+      condition:
+        oxygen: "normal"
+        temperature: "normal"
+        humidity: "normal"
+      action:
+        fan_speed: "stop"
+      weight: 1.0
+      description: "所有参数正常，停止风机"
+    
+    - id: 5
+      condition:
+        oxygen: "normal"
+        temperature: "normal"
+        humidity: "humid"
+      action:
+        fan_speed: "low"
+      weight: 0.7
+      description: "湿度偏高，低速通风"
+    
+    - id: 6
+      condition:
+        oxygen: "normal"
+        temperature: "high"
+      action:
+        fan_speed: "medium"
+      weight: 1.0
+      description: "温度偏高，中速通风降温"
+    
+    - id: 7
+      condition:
+        oxygen: "normal"
+        temperature: "very_high"
+      action:
+        fan_speed: "high"
+      weight: 1.0
+      description: "温度过高，高速通风降温"
+    
+    - id: 8
+      condition:
+        oxygen: "high"
+      action:
+        fan_speed: "medium"
+      weight: 0.6
+      description: "氧气浓度偏高，中速通风"
+    
+    - id: 9
+      condition:
+        temperature: "very_high"
+        humidity: "humid"
+      action:
+        fan_speed: "high"
+      weight: 0.9
+      description: "高温高湿，高速通风"
+    
+    - id: 10
+      condition:
+        temperature: "high"
+        humidity: "humid"
+      action:
+        fan_speed: "medium"
+      weight: 0.8
+      description: "高温高湿，中速通风"
+    
+    - id: 11
+      condition:
+        oxygen: "low"
+        temperature: "high"
+      action:
+        fan_speed: "full"
+      weight: 1.0
+      description: "氧气低且温度高，全速运行"
+    
+    - id: 12
+      condition:
+        oxygen: "normal"
+        temperature: "normal"
+        humidity: "dry"
+      action:
+        fan_speed: "stop"
+      weight: 0.5
+      description: "所有参数正常，停止风机"
+
+  defuzzification:
+    method: "centroid"
+
+  control_parameters:
+    min_fan_speed: 0
+    max_fan_speed: 100
+    speed_threshold: 5
+    control_interval: 30
+    emergency_oxygen_threshold: 17
+    emergency_temperature_threshold: 38
+
+pump_control:
+  level_high: 80
+  level_low: 30
+  min_run_time: 30
+  delay_start: 60
+  history_window: 60
+
+alarm_thresholds:
+  methane: 1.0
+  h2s: 10.0
+  oxygen_low: 18.0
+  temperature_high: 35.0
+
+redis_channels:
+  sensor_data: "tunnel:sensor:data"
+  control_command: "tunnel:control:command"
+  alarm_event: "tunnel:alarm:event"
+  device_status: "tunnel:device:status"

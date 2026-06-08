@@ -55,8 +55,9 @@ class PIDController:
         self.last_output = 0.0
 
 
-class VentilationController:
-    def __init__(self):
+class ChamberVentilationController:
+    def __init__(self, chamber: str):
+        self.chamber = chamber
         self.oxygen_pid = PIDController(
             kp=settings.PID_KP,
             ki=settings.PID_KI,
@@ -73,7 +74,8 @@ class VentilationController:
             output_min=0,
             output_max=100
         )
-        self.fan_states: Dict[str, Dict[str, Any]] = {}
+        self.fan_ids: List[str] = []
+        self.last_calculation: Dict[str, Any] = {}
     
     def calculate_control(self, oxygen: float, temperature: float, 
                          humidity: float) -> Tuple[bool, int, Dict[str, Any]]:
@@ -107,6 +109,7 @@ class VentilationController:
             speed = 100
         
         control_details = {
+            "chamber": self.chamber,
             "oxygen": oxygen,
             "temperature": temperature,
             "humidity": humidity,
@@ -122,7 +125,27 @@ class VentilationController:
             "timestamp": datetime.utcnow().isoformat()
         }
         
+        self.last_calculation = control_details
         return running, speed, control_details
+
+
+class VentilationController:
+    def __init__(self):
+        self.chamber_controllers: Dict[str, ChamberVentilationController] = {}
+        self.fan_states: Dict[str, Dict[str, Any]] = {}
+        
+        for chamber in settings.CHAMBERS:
+            self.chamber_controllers[chamber] = ChamberVentilationController(chamber)
+    
+    def _get_controller(self, chamber: str) -> ChamberVentilationController:
+        if chamber not in self.chamber_controllers:
+            self.chamber_controllers[chamber] = ChamberVentilationController(chamber)
+        return self.chamber_controllers[chamber]
+    
+    def calculate_control(self, oxygen: float, temperature: float, 
+                         humidity: float, chamber: str = "综合") -> Tuple[bool, int, Dict[str, Any]]:
+        controller = self._get_controller(chamber)
+        return controller.calculate_control(oxygen, temperature, humidity)
     
     def update_fan_state(self, fan_id: str, running: bool, speed: int):
         self.fan_states[fan_id] = {

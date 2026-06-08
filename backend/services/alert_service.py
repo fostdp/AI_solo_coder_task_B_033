@@ -178,7 +178,10 @@ class AlertService:
             "data": alert_dict
         })
         
-        await self._send_sms(alert)
+        if alert.level == AlertLevel.LEVEL2:
+            await self._send_sms(alert)
+        else:
+            logger.info(f"SMS skipped for {alert.level} alert: {alert.message} (WebSocket only)")
     
     async def _send_sms(self, alert: Alert):
         alert_key = f"{alert.device_id}_{alert.type}"

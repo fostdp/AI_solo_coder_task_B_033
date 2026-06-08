@@ -62,22 +62,156 @@ class ControlService:
             "control_actions": control_actions
         }
     
+    async def process_sensor_data_batch(self, sensor_data_list: List[SensorData]) -> Dict[str, Any]:
+        if not sensor_data_list:
+            return {"processed": 0, "alerts_count": 0, "control_actions": []}
+        
+        device_ids = [d.device_id for d in sensor_data_list]
+        
+        devices_cursor = devices_collection.find({"device_id": {"$in": device_ids}})
+        devices_list = await devices_cursor.to_list(length=len(device_ids))
+        device_map = {d["device_id"]: d for d in devices_list}
+        
+        valid_data = []
+        sensor_dicts = []
+        device_updates = []
+        env_sensor_data = []
+        pump_sensor_data = []
+        
+        for data in sensor_data_list:
+            device = device_map.get(data.device_id)
+            if not device:
+                continue
+            
+            if device["type"] == "env_sensor":
+                data.type = "env_sensor"
+            elif device["type"] == "pump":
+                data.type = "pump"
+            elif device["type"] == "manhole":
+                data.type = "manhole"
+            elif device["type"] == "fan":
+                data.type = "fan"
+            else:
+                data.type = device["type"]
+            
+            if data.location is None and device.get("location"):
+                data.location = device["location"]
+            
+            valid_data.append(data)
+            sensor_dicts.append(data.dict())
+            device_updates.append({
+                "update_one": {
+                    "filter": {"device_id": data.device_id},
+                    "update": {"$set": {"last_data": data.dict()}}
+                }
+            })
+            
+            if data.type == "env_sensor" and data.oxygen is not None:
+                env_sensor_data.append((data, device))
+            if data.type == "pump" and data.level is not None:
+                pump_sensor_data.append((data, device))
+        
+        if sensor_dicts:
+            await sensor_data_collection.insert_many(sensor_dicts, ordered=False)
+        
+        if device_updates:
+            await devices_collection.bulk_write(device_updates, ordered=False)
+        
+        all_alerts = []
+        for data in valid_data:
+            alerts = await alert_service.check_sensor_data(data)
+            all_alerts.extend(alerts)
+        
+        all_control_actions = []
+        
+        if env_sensor_data:
+            actions = await self._process_ventilation_control_batch(env_sensor_data)
+            all_control_actions.extend(actions)
+        
+        for data, device in pump_sensor_data:
+            actions = await self._process_pump_control(data)
+            all_control_actions.extend(actions)
+        
+        status_updates = []
+        for data in valid_data:
+            status = await self._calculate_device_status(data.device_id, device_map.get(data.device_id, {}))
+            if status:
+                status_updates.append({
+                    "update_one": {
+                        "filter": {"device_id": data.device_id},
+                        "update": {"$set": {"status": status}}
+                    }
+                })
+        
+        if status_updates:
+            await devices_collection.bulk_write(status_updates, ordered=False)
+        
+        return {
+            "processed": len(valid_data),
+            "alerts_count": len(all_alerts),
+            "control_actions": all_control_actions
+        }
+    
+    async def _calculate_device_status(self, device_id: str, device: Dict[str, Any]) -> Optional[str]:
+        if not device:
+            return None
+        
+        status = DeviceStatus.NORMAL
+        device_type = device.get("type")
+        
+        if device_type == "env_sensor":
+            last_data = device.get("last_data", {})
+            if last_data.get("methane", 0) >= settings.METHANE_ALARM * 0.8 or \
+               last_data.get("h2s", 0) >= settings.H2S_ALARM * 0.8 or \
+               last_data.get("oxygen", 20) < settings.OXYGEN_ALARM_LOW + 1 or \
+               last_data.get("temperature", 25) > settings.TEMPERATURE_MAX - 3:
+                status = DeviceStatus.WARNING
+            
+            if last_data.get("methane", 0) >= settings.METHANE_ALARM or \
+               last_data.get("h2s", 0) >= settings.H2S_ALARM or \
+               last_data.get("oxygen", 20) < settings.OXYGEN_ALARM_LOW or \
+               last_data.get("temperature", 25) > settings.TEMPERATURE_MAX:
+                status = DeviceStatus.FAULT
+        
+        elif device_type == "manhole":
+            last_data = device.get("last_data", {})
+            if last_data.get("cover_open", False):
+                status = DeviceStatus.FAULT
+        
+        elif device_type in ["pump", "fan"]:
+            props = device.get("properties", {})
+            fault_count = props.get("fault_count", 0)
+            if fault_count > 3:
+                status = DeviceStatus.FAULT
+            elif fault_count > 0:
+                status = DeviceStatus.WARNING
+        
+        return status
+    
     async def _process_ventilation_control(self, sensor_data: SensorData) -> List[Dict[str, Any]]:
         if sensor_data.oxygen is None or sensor_data.temperature is None:
             return []
         
+        device = await devices_collection.find_one({"device_id": sensor_data.device_id})
+        if not device:
+            return []
+        
+        chamber = device.get("chamber", "综合")
+        
         running, speed, control_details = ventilation_controller.calculate_control(
             oxygen=sensor_data.oxygen,
             temperature=sensor_data.temperature,
-            humidity=sensor_data.humidity or 60
+            humidity=sensor_data.humidity or 60,
+            chamber=chamber
         )
         
         control_actions = []
         
         fans = await devices_collection.find({
             "type": "fan",
+            "chamber": chamber,
             "status": {"$ne": "fault"}
-        }).to_list(length=settings.NUM_FANS)
+        }).to_list(length=settings.FANS_PER_CHAMBER + 5)
         
         for fan in fans:
             fan_id = fan["device_id"]
@@ -98,6 +232,58 @@ class ControlService:
                 self.fan_last_control[fan_id] = now
         
         return control_actions
+    
+    async def _process_ventilation_control_batch(self, env_sensor_data: List[tuple]) -> List[Dict[str, Any]]:
+        if not env_sensor_data:
+            return []
+        
+        chamber_data = defaultdict(list)
+        for data, device in env_sensor_data:
+            chamber = device.get("chamber", "综合")
+            chamber_data[chamber].append((data, device))
+        
+        all_actions = []
+        
+        for chamber, sensors in chamber_data.items():
+            if not sensors:
+                continue
+            
+            avg_oxygen = sum(s[0].oxygen for s in sensors if s[0].oxygen is not None) / len(sensors)
+            avg_temp = sum(s[0].temperature for s in sensors if s[0].temperature is not None) / len(sensors)
+            avg_humidity = sum((s[0].humidity or 60) for s in sensors) / len(sensors)
+            
+            running, speed, control_details = ventilation_controller.calculate_control(
+                oxygen=avg_oxygen,
+                temperature=avg_temp,
+                humidity=avg_humidity,
+                chamber=chamber
+            )
+            
+            fans = await devices_collection.find({
+                "type": "fan",
+                "chamber": chamber,
+                "status": {"$ne": "fault"}
+            }).to_list(length=settings.FANS_PER_CHAMBER + 5)
+            
+            for fan in fans:
+                fan_id = fan["device_id"]
+                now = datetime.utcnow()
+                
+                last_control = self.fan_last_control.get(fan_id)
+                if last_control and (now - last_control).total_seconds() < self.control_interval:
+                    continue
+                
+                current_state = fan.get("properties", {})
+                current_running = current_state.get("running", False)
+                current_speed = current_state.get("speed", 0)
+                
+                if current_running != running or current_speed != speed:
+                    action = await self._control_fan(fan_id, running, speed, control_details)
+                    if action:
+                        all_actions.append(action)
+                    self.fan_last_control[fan_id] = now
+        
+        return all_actions
     
     async def _control_fan(self, fan_id: str, running: bool, speed: int,
                            control_details: Dict[str, Any]) -> Optional[Dict[str, Any]]:

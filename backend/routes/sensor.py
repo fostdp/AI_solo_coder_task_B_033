@@ -1,6 +1,9 @@
+import logging
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from typing import List, Optional
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 from backend.models.schemas import SensorData
 from backend.models.database import (
@@ -9,6 +12,7 @@ from backend.models.database import (
     serialize_document,
     serialize_documents
 )
+from backend.modules import lora_receiver
 from backend.services.control_service import control_service
 
 router = APIRouter(prefix="/api/sensor", tags=["sensor"])
@@ -16,26 +20,10 @@ router = APIRouter(prefix="/api/sensor", tags=["sensor"])
 
 @router.post("/data")
 async def receive_sensor_data(data: SensorData):
-    device = await devices_collection.find_one({"device_id": data.device_id})
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
+    result = await lora_receiver.process_data(data)
     
-    if device["type"] == "env_sensor":
-        data.type = "env_sensor"
-    elif device["type"] == "pump":
-        data.type = "pump"
-    elif device["type"] == "manhole":
-        data.type = "manhole"
-    elif device["type"] == "fan":
-        data.type = "fan"
-    else:
-        data.type = device["type"]
-    
-    if data.location is None and device.get("location"):
-        from backend.models.schemas import Location
-        data.location = Location(**device["location"])
-    
-    result = await control_service.process_sensor_data(data)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result.get("errors", ["Unknown error"]))
     
     return {
         "status": "success",
@@ -44,39 +32,28 @@ async def receive_sensor_data(data: SensorData):
 
 
 @router.post("/data/batch")
-async def receive_sensor_data_batch(datas: List[SensorData]):
-    results = []
-    for data in datas:
+async def receive_sensor_data_batch(datas: List[SensorData], background_tasks: BackgroundTasks):
+    batch_size = 50
+    all_results = []
+    
+    for i in range(0, len(datas), batch_size):
+        batch = datas[i:i + batch_size]
         try:
-            device = await devices_collection.find_one({"device_id": data.device_id})
-            if device:
-                if device["type"] == "env_sensor":
-                    data.type = "env_sensor"
-                elif device["type"] == "pump":
-                    data.type = "pump"
-                elif device["type"] == "manhole":
-                    data.type = "manhole"
-                elif device["type"] == "fan":
-                    data.type = "fan"
-                else:
-                    data.type = device["type"]
-                
-                if data.location is None and device.get("location"):
-                    from backend.models.schemas import Location
-                    data.location = Location(**device["location"])
-                
-                result = await control_service.process_sensor_data(data)
-                results.append({"device_id": data.device_id, "status": "success", **result})
-            else:
-                results.append({"device_id": data.device_id, "status": "error", "reason": "Device not found"})
+            result = await lora_receiver.process_batch_data(batch)
+            all_results.append(result)
         except Exception as e:
-            results.append({"device_id": data.device_id, "status": "error", "reason": str(e)})
+            logger.error(f"Batch processing error: {e}")
+            all_results.append({"processed": 0, "failed": len(batch), "failed_items": [], "error": str(e)})
+    
+    total_processed = sum(r.get("processed", 0) for r in all_results)
+    total_failed = sum(r.get("failed", 0) for r in all_results)
     
     return {
         "status": "success",
-        "processed": len([r for r in results if r["status"] == "success"]),
-        "failed": len([r for r in results if r["status"] == "error"]),
-        "results": results
+        "total_received": len(datas),
+        "total_processed": total_processed,
+        "total_failed": total_failed,
+        "batches": len(all_results)
     }
 
 

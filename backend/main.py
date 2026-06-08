@@ -11,6 +11,12 @@ from backend.config import settings
 from backend.services.mqtt_service import mqtt_service
 from backend.services.control_service import control_service
 from backend.services.alert_service import websocket_manager
+from backend.modules import (
+    lora_receiver,
+    ventilation_controller,
+    pump_controller_module,
+    alarm_manager
+)
 from backend.routes import devices, sensor, alerts, control, stats
 
 logging.basicConfig(
@@ -25,6 +31,16 @@ async def lifespan(app: FastAPI):
     logger.info("Starting underground utility tunnel monitoring system...")
     
     await mqtt_service.connect()
+    
+    await lora_receiver.connect_redis()
+    await ventilation_controller.connect_redis()
+    await pump_controller_module.connect_redis()
+    await alarm_manager.connect_redis()
+    
+    redis_listener_task = asyncio.create_task(lora_receiver.start_redis_listener())
+    ventilation_task = asyncio.create_task(ventilation_controller.start_control_loop())
+    pump_task = asyncio.create_task(pump_controller_module.start_control_loop())
+    alarm_task = asyncio.create_task(alarm_manager.start_listener())
     
     async def periodic_health_check():
         while True:
@@ -89,6 +105,14 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     health_task.cancel()
     broadcast_task.cancel()
+    redis_listener_task.cancel()
+    ventilation_task.cancel()
+    pump_task.cancel()
+    alarm_task.cancel()
+    await lora_receiver.disconnect_redis()
+    await ventilation_controller.disconnect_redis()
+    await pump_controller_module.disconnect_redis()
+    await alarm_manager.disconnect_redis()
     await mqtt_service.disconnect()
     logger.info("System shutdown complete")
 
