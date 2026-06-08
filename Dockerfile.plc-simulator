@@ -1,0 +1,45 @@
+# ============================================
+# MQTT PLC Simulator Dockerfile
+# ============================================
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels paho-mqtt httpx
+
+FROM python:3.12-slim AS runtime
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r simuser \
+    && useradd -r -g simuser simuser
+
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --find-links=/wheels paho-mqtt httpx \
+    && rm -rf /wheels
+
+COPY --chown=simuser:simuser simulators/mqtt_plc_simulator.py .
+
+RUN chown -R simuser:simuser /app
+USER simuser
+
+HEALTHCHECK --interval=60s --timeout=3s --start-period=30s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)" || exit 1
+
+CMD ["python", "mqtt_plc_simulator.py"]

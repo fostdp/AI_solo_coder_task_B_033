@@ -1,0 +1,265 @@
+version: '3.8'
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: tunnel-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - fastapi
+    networks:
+      - tunnel-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tunnel-fastapi
+    environment:
+      - APP_ENV=production
+      - PORT=8000
+      - WORKERS=${FASTAPI_WORKERS:-4}
+      - THREADS=${FASTAPI_THREADS:-4}
+      - MONGODB_URL=mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0
+      - MONGODB_DB=utility_tunnel
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MQTT_BROKER=mqtt
+      - MQTT_PORT=1883
+      - FUZZY_RULES_PATH=/app/config/fuzzy_rules.yaml
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      - mongo1
+      - mongo2
+      - mongo3
+      - redis
+      - mqtt
+    networks:
+      - tunnel-net
+    expose:
+      - "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  mongo1:
+    image: mongo:6
+    container_name: tunnel-mongo1
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    volumes:
+      - mongo1-data:/data/db
+      - ./docker/mongo/replicaset-init.js:/docker-entrypoint-initdb.d/replicaset-init.js:ro
+    environment:
+      - MONGO_INITDB_DATABASE=utility_tunnel
+    networks:
+      - tunnel-net
+    expose:
+      - "27017"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  mongo2:
+    image: mongo:6
+    container_name: tunnel-mongo2
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    volumes:
+      - mongo2-data:/data/db
+    networks:
+      - tunnel-net
+    expose:
+      - "27017"
+    restart: unless-stopped
+    depends_on:
+      - mongo1
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  mongo3:
+    image: mongo:6
+    container_name: tunnel-mongo3
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    volumes:
+      - mongo3-data:/data/db
+    networks:
+      - tunnel-net
+    expose:
+      - "27017"
+    restart: unless-stopped
+    depends_on:
+      - mongo1
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  mongos:
+    image: mongo:6
+    container_name: tunnel-mongos
+    command: mongos --configdb rs0/mongo1:27017,mongo2:27017,mongo3:27017 --bind_ip_all --port 27018
+    volumes:
+      - ./docker/mongo/shard-init.js:/docker-entrypoint-initdb.d/shard-init.js:ro
+    depends_on:
+      - mongo1
+      - mongo2
+      - mongo3
+    networks:
+      - tunnel-net
+    expose:
+      - "27018"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27018", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  redis:
+    image: redis:7-alpine
+    container_name: tunnel-redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - tunnel-net
+    expose:
+      - "6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: tunnel-mqtt
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+      - mqtt-log:/mosquitto/log
+    networks:
+      - tunnel-net
+    expose:
+      - "1883"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$SYS/#", "-C", "1", "-i", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  lora-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.lora-simulator
+    container_name: tunnel-lora-simulator
+    environment:
+      - LORA_API_URL=http://fastapi:8000/api/sensor/data
+      - LORA_INTERVAL=${LORA_INTERVAL:-60}
+      - LORA_NUM_ENV_SENSORS=${LORA_NUM_ENV_SENSORS:-200}
+      - LORA_NUM_MANHOLE_SENSORS=${LORA_NUM_MANHOLE_SENSORS:-100}
+      - LORA_METHANE_NORMAL_MIN=${LORA_METHANE_NORMAL_MIN:-0.0}
+      - LORA_METHANE_NORMAL_MAX=${LORA_METHANE_NORMAL_MAX:-0.1}
+      - LORA_METHANE_ANOMALY_MIN=${LORA_METHANE_ANOMALY_MIN:-0.8}
+      - LORA_METHANE_ANOMALY_MAX=${LORA_METHANE_ANOMALY_MAX:-1.5}
+      - LORA_H2S_NORMAL_MIN=${LORA_H2S_NORMAL_MIN:-0.0}
+      - LORA_H2S_NORMAL_MAX=${LORA_H2S_NORMAL_MAX:-5.0}
+      - LORA_H2S_ANOMALY_MIN=${LORA_H2S_ANOMALY_MIN:-12.0}
+      - LORA_H2S_ANOMALY_MAX=${LORA_H2S_ANOMALY_MAX:-20.0}
+      - LORA_OXYGEN_NORMAL_MIN=${LORA_OXYGEN_NORMAL_MIN:-19.5}
+      - LORA_OXYGEN_NORMAL_MAX=${LORA_OXYGEN_NORMAL_MAX:-20.5}
+      - LORA_OXYGEN_ANOMALY_MIN=${LORA_OXYGEN_ANOMALY_MIN:-16.0}
+      - LORA_OXYGEN_ANOMALY_MAX=${LORA_OXYGEN_ANOMALY_MAX:-17.5}
+      - LORA_TEMPERATURE_NORMAL_MIN=${LORA_TEMPERATURE_NORMAL_MIN:-18.0}
+      - LORA_TEMPERATURE_NORMAL_MAX=${LORA_TEMPERATURE_NORMAL_MAX:-28.0}
+      - LORA_HUMIDITY_NORMAL_MIN=${LORA_HUMIDITY_NORMAL_MIN:-40.0}
+      - LORA_HUMIDITY_NORMAL_MAX=${LORA_HUMIDITY_NORMAL_MAX:-70.0}
+      - LORA_ANOMALY_PROBABILITY=${LORA_ANOMALY_PROBABILITY:-0.05}
+    depends_on:
+      - fastapi
+    networks:
+      - tunnel-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+  plc-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.plc-simulator
+    container_name: tunnel-plc-simulator
+    environment:
+      - PLC_MQTT_BROKER=mqtt
+      - PLC_MQTT_PORT=1883
+      - PLC_CONTROL_TOPIC=tunnel/control
+      - PLC_STATUS_TOPIC=tunnel/status
+      - PLC_TELEMETRY_TOPIC=tunnel/telemetry
+      - PLC_RESPONSE_TOPIC_PREFIX=tunnel/response
+      - PLC_API_URL=http://fastapi:8000
+      - PLC_NUM_FANS=${PLC_NUM_FANS:-30}
+      - PLC_NUM_PUMPS=${PLC_NUM_PUMPS:-50}
+      - PLC_STATUS_INTERVAL=${PLC_STATUS_INTERVAL:-10}
+      - PLC_TELEMETRY_INTERVAL=${PLC_TELEMETRY_INTERVAL:-60}
+      - PLC_ENABLE_MQTT=true
+      - PLC_ENABLE_HTTP_FALLBACK=true
+    depends_on:
+      - mqtt
+      - fastapi
+    networks:
+      - tunnel-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+networks:
+  tunnel-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  mongo1-data:
+  mongo2-data:
+  mongo3-data:
+  redis-data:
+  mqtt-data:
+  mqtt-log:
