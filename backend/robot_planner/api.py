@@ -11,7 +11,13 @@ from backend.models.database import (
     serialize_document,
     serialize_documents
 )
-from backend.modules import robot_inspector
+from robot_planner.core import robot_planner
+from robot_planner.path_process import (
+    is_process_running,
+    get_process_status,
+    start_path_planner_process,
+    stop_path_planner_process
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +26,7 @@ router = APIRouter(prefix="/api/robots", tags=["robots"])
 
 @router.get("/")
 async def get_all_robots():
-    robots = await robot_inspector.get_all_robots()
+    robots = await robot_planner.get_all_robots()
     return {
         "robots": robots,
         "count": len(robots)
@@ -29,7 +35,7 @@ async def get_all_robots():
 
 @router.get("/{robot_id}")
 async def get_robot(robot_id: str):
-    robot = await robot_inspector.get_robot(robot_id)
+    robot = await robot_planner.get_robot(robot_id)
     if not robot:
         raise HTTPException(status_code=404, detail=f"Robot {robot_id} not found")
     return robot
@@ -37,7 +43,7 @@ async def get_robot(robot_id: str):
 
 @router.post("/{robot_id}/position")
 async def update_robot_position(position: RobotPosition):
-    result = await robot_inspector.update_robot_position(position)
+    result = await robot_planner.update_robot_position(position)
     return result
 
 
@@ -46,7 +52,7 @@ async def get_robot_trajectory(
     robot_id: str,
     hours: int = Query(1, ge=1, le=168)
 ):
-    positions = await robot_inspector.get_robot_trajectory(robot_id, hours)
+    positions = await robot_planner.get_robot_trajectory(robot_id, hours)
     return {
         "robot_id": robot_id,
         "period_hours": hours,
@@ -57,7 +63,7 @@ async def get_robot_trajectory(
 
 @router.post("/{robot_id}/pause")
 async def pause_robot(robot_id: str):
-    success = await robot_inspector.pause_robot(robot_id)
+    success = await robot_planner.pause_robot(robot_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Robot {robot_id} not found")
     return {"status": "success", "robot_id": robot_id, "action": "paused"}
@@ -65,7 +71,7 @@ async def pause_robot(robot_id: str):
 
 @router.post("/{robot_id}/resume")
 async def resume_robot(robot_id: str):
-    success = await robot_inspector.resume_robot(robot_id)
+    success = await robot_planner.resume_robot(robot_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Robot {robot_id} not found")
     return {"status": "success", "robot_id": robot_id, "action": "resumed"}
@@ -73,7 +79,7 @@ async def resume_robot(robot_id: str):
 
 @router.post("/{robot_id}/return")
 async def return_to_base(robot_id: str):
-    success = await robot_inspector.return_to_base(robot_id)
+    success = await robot_planner.return_to_base(robot_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Robot {robot_id} not found")
     return {"status": "success", "robot_id": robot_id, "action": "returning_to_base"}
@@ -104,7 +110,7 @@ async def get_missions(
 
 @router.get("/missions/active")
 async def get_active_missions():
-    missions = await robot_inspector.get_active_missions()
+    missions = await robot_planner.get_active_missions()
     return {
         "missions": missions,
         "count": len(missions)
@@ -113,7 +119,7 @@ async def get_active_missions():
 
 @router.get("/missions/{mission_id}")
 async def get_mission(mission_id: str):
-    mission = await robot_inspector.get_mission(mission_id)
+    mission = await robot_planner.get_mission(mission_id)
     if not mission:
         raise HTTPException(status_code=404, detail=f"Mission {mission_id} not found")
     return mission
@@ -135,7 +141,7 @@ async def plan_inspection_mission(
         points = [float(p) for p in inspection_points.split(",")]
 
     try:
-        mission = await robot_inspector.plan_path(
+        mission = await robot_planner.plan_path(
             robot_id=robot_id,
             start_km=start_km,
             end_km=end_km,
@@ -144,7 +150,7 @@ async def plan_inspection_mission(
         )
         return {
             "status": "success",
-            "mission": mission.model_dump(exclude={"id"})
+            "mission": mission.dict(exclude={"id"})
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -152,7 +158,7 @@ async def plan_inspection_mission(
 
 @router.post("/missions/{mission_id}/start")
 async def start_mission(mission_id: str):
-    success = await robot_inspector.start_mission(mission_id)
+    success = await robot_planner.start_mission(mission_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Mission {mission_id} not found or already started")
     return {"status": "success", "mission_id": mission_id, "action": "started"}
@@ -245,3 +251,29 @@ async def get_robot_statistics():
         "mission_distribution": {m["_id"]: m["count"] for m in mission_stats},
         "today_missions": today_missions
     }
+
+
+@router.get("/path-planner/status")
+async def get_path_planner_status():
+    return {
+        "process_running": is_process_running(),
+        "status": get_process_status()
+    }
+
+
+@router.post("/path-planner/start")
+async def start_path_planner():
+    success = start_path_planner_process()
+    if success:
+        return {"status": "success", "message": "Path planner process started"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to start path planner process")
+
+
+@router.post("/path-planner/stop")
+async def stop_path_planner():
+    success = stop_path_planner_process()
+    if success:
+        return {"status": "success", "message": "Path planner process stopped"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to stop path planner process")

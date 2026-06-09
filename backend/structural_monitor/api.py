@@ -10,7 +10,7 @@ from backend.models.database import (
     serialize_document,
     serialize_documents
 )
-from backend.modules import structure_monitor
+from structural_monitor.core import structure_monitor
 
 logger = logging.getLogger(__name__)
 

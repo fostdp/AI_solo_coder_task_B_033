@@ -15,13 +15,25 @@ from backend.modules import (
     lora_receiver,
     ventilation_controller,
     pump_controller_module,
-    alarm_manager,
-    structure_monitor,
-    robot_inspector,
-    fire_detector,
-    asset_manager
+    alarm_manager
 )
-from backend.routes import devices, sensor, alerts, control, stats, structure, robots, fire, assets
+from structural_monitor.core import structure_monitor
+from structural_monitor.api import router as structure_router
+from robot_planner.core import robot_planner
+from robot_planner.api import router as robots_router
+from robot_planner.path_process import (
+    start_path_planner_process,
+    stop_path_planner_process
+)
+from fire_early_warning.core import fire_early_warning
+from fire_early_warning.api import router as fire_router
+from fire_early_warning.inference_service import (
+    start_inference_service,
+    stop_inference_service
+)
+from asset_manager.core import asset_manager
+from asset_manager.api import router as assets_router
+from backend.routes import devices, sensor, alerts, control, stats
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,19 +53,40 @@ async def lifespan(app: FastAPI):
     await pump_controller_module.connect_redis()
     await alarm_manager.connect_redis()
     await structure_monitor.connect_redis()
-    await robot_inspector.connect_redis()
-    await fire_detector.connect_redis()
+    await robot_planner.connect_redis()
+    await fire_early_warning.connect_redis()
     await asset_manager.connect_redis()
+    
+    logger.info("Starting robot path planner process...")
+    try:
+        process_started = start_path_planner_process()
+        if process_started:
+            logger.info("Robot path planner process started successfully")
+        else:
+            logger.warning("Robot path planner process failed to start")
+    except Exception as e:
+        logger.error(f"Error starting robot path planner process: {e}")
+    
+    logger.info("Starting fire inference service...")
+    try:
+        service_started = start_inference_service()
+        if service_started:
+            logger.info("Fire inference service started successfully")
+        else:
+            logger.warning("Fire inference service failed to start")
+    except Exception as e:
+        logger.error(f"Error starting fire inference service: {e}")
     
     redis_listener_task = asyncio.create_task(lora_receiver.start_redis_listener())
     ventilation_task = asyncio.create_task(ventilation_controller.start_control_loop())
     pump_task = asyncio.create_task(pump_controller_module.start_control_loop())
     alarm_task = asyncio.create_task(alarm_manager.start_listener())
     structure_task = asyncio.create_task(structure_monitor.start_listener())
-    robot_task = asyncio.create_task(robot_inspector.start_control_loop())
-    fire_task = asyncio.create_task(fire_detector.start_listener())
+    robot_task = asyncio.create_task(robot_planner.start_control_loop())
+    fire_task = asyncio.create_task(fire_early_warning.start_listener())
     life_prediction_task = asyncio.create_task(asset_manager.start_life_prediction_service())
     maintenance_plan_task = asyncio.create_task(asset_manager.start_monthly_plan_generator())
+    replacement_scan_task = asyncio.create_task(asset_manager.start_replacement_scan_service())
     
     async def periodic_health_check():
         while True:
@@ -127,13 +160,29 @@ async def lifespan(app: FastAPI):
     fire_task.cancel()
     life_prediction_task.cancel()
     maintenance_plan_task.cancel()
+    replacement_scan_task.cancel()
+    
+    logger.info("Stopping robot path planner process...")
+    try:
+        stop_path_planner_process()
+        logger.info("Robot path planner process stopped")
+    except Exception as e:
+        logger.error(f"Error stopping robot path planner process: {e}")
+    
+    logger.info("Stopping fire inference service...")
+    try:
+        stop_inference_service()
+        logger.info("Fire inference service stopped")
+    except Exception as e:
+        logger.error(f"Error stopping fire inference service: {e}")
+    
     await lora_receiver.disconnect_redis()
     await ventilation_controller.disconnect_redis()
     await pump_controller_module.disconnect_redis()
     await alarm_manager.disconnect_redis()
     await structure_monitor.disconnect_redis()
-    await robot_inspector.disconnect_redis()
-    await fire_detector.disconnect_redis()
+    await robot_planner.disconnect_redis()
+    await fire_early_warning.disconnect_redis()
     await asset_manager.disconnect_redis()
     await mqtt_service.disconnect()
     logger.info("System shutdown complete")
@@ -163,10 +212,10 @@ app.include_router(sensor.router)
 app.include_router(alerts.router)
 app.include_router(control.router)
 app.include_router(stats.router)
-app.include_router(structure.router)
-app.include_router(robots.router)
-app.include_router(fire.router)
-app.include_router(assets.router)
+app.include_router(structure_router)
+app.include_router(robots_router)
+app.include_router(fire_router)
+app.include_router(assets_router)
 
 
 @app.get("/")

@@ -25,6 +25,12 @@ from backend.models.schemas import (
     WeldingDetectionResult,
     FireAlertConfirmation
 )
+from fire_early_warning.inference_service import (
+    start_inference_service,
+    stop_inference_service,
+    is_service_running,
+    call_inference_service
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +105,7 @@ class BayesianFireDetector:
         return posterior_fire / total
 
 
-class FireDetector:
+class FireEarlyWarning:
     def __init__(self):
         self.redis_client: Optional[redis.Redis] = None
         self.bayesian_detector = BayesianFireDetector()
@@ -110,6 +116,7 @@ class FireDetector:
         self.active_fire_zones: Dict[str, Dict[str, Any]] = {}
         self.pending_confirmations: Dict[str, FireAlertConfirmation] = {}
         self.heat_source_cache: Dict[str, List[Tuple[datetime, float, float]]] = {}
+        self.use_inference_service = True
 
     async def connect_redis(self):
         self.redis_client = redis.Redis(
@@ -117,12 +124,12 @@ class FireDetector:
             port=settings.REDIS_PORT,
             db=settings.REDIS_DB
         )
-        logger.info("Fire Detector connected to Redis")
+        logger.info("Fire Early Warning connected to Redis")
 
     async def disconnect_redis(self):
         if self.redis_client:
             await self.redis_client.close()
-            logger.info("Fire Detector disconnected from Redis")
+            logger.info("Fire Early Warning disconnected from Redis")
 
     def _calculate_temp_rate(self, device_id: str, current_temp: float) -> float:
         now = datetime.utcnow()
@@ -192,6 +199,35 @@ class FireDetector:
 
         return False
 
+    async def _calculate_fire_probability(
+        self,
+        temperature: float,
+        temp_rate: float,
+        smoke_density: float,
+        correlation: float
+    ) -> float:
+        if self.use_inference_service and is_service_running():
+            try:
+                result = await call_inference_service(
+                    temperature=temperature,
+                    temp_rate=temp_rate,
+                    smoke_density=smoke_density,
+                    temp_smoke_correlation=correlation,
+                    timeout=3.0
+                )
+                if result and result.get("success") and "fire_probability" in result:
+                    logger.info(f"Used inference service for fire probability: {result['fire_probability']:.3f}")
+                    return result["fire_probability"]
+            except Exception as e:
+                logger.warning(f"Inference service call failed, falling back to local: {e}")
+
+        return self.bayesian_detector.calculate_fire_probability(
+            temperature=temperature,
+            temp_rate=temp_rate,
+            smoke_density=smoke_density,
+            temp_smoke_correlation=correlation
+        )
+
     async def process_fire_sensor_data(self, data: FireSensorData) -> Dict[str, Any]:
         device_info = await devices_collection.find_one({"device_id": data.device_id})
         if not device_info:
@@ -229,11 +265,11 @@ class FireDetector:
         heat_source_features = await self._extract_heat_source_features(data.device_id)
         welding_result = await self._detect_welding_operation(data.device_id, heat_source_features)
 
-        fire_probability = self.bayesian_detector.calculate_fire_probability(
+        fire_probability = await self._calculate_fire_probability(
             temperature=data.temperature,
             temp_rate=temp_rate,
             smoke_density=data.smoke_density,
-            temp_smoke_correlation=correlation
+            correlation=correlation
         )
 
         is_overheat = self._is_equipment_overheat(
@@ -264,9 +300,9 @@ class FireDetector:
 
         if adjusted_fire_probability >= settings.FIRE_PROBABILITY_THRESHOLD and not is_overheat and not welding_result.is_welding:
             risk_level = "critical" if adjusted_fire_probability >= 0.9 else "warning"
-            
+
             requires_confirmation = risk_level == "critical"
-            
+
             if requires_confirmation:
                 confirmation = await self._create_alert_confirmation(
                     data.device_id, chamber, distance_km, adjusted_fire_probability,
@@ -275,7 +311,7 @@ class FireDetector:
                 result["confirmation"] = confirmation.dict()
                 result["risk_level"] = risk_level
                 result["requires_confirmation"] = True
-                
+
                 if confirmation.auto_upgraded:
                     alert_result = await self._create_fire_alert(
                         chamber, distance_km, adjusted_fire_probability,
@@ -297,7 +333,7 @@ class FireDetector:
             result["risk_level"] = "attention"
         else:
             result["risk_level"] = "normal"
-        
+
         await self._check_confirmation_timeouts()
 
         if self.redis_client:
@@ -348,7 +384,7 @@ class FireDetector:
             is_equipment_overheat=False
         )
 
-        result = await fire_alerts_collection.insert_one(alert.model_dump(exclude={"id"}))
+        result = await fire_alerts_collection.insert_one(alert.dict(exclude={"id"}))
         self.alert_cooldowns[zone_key] = now
 
         if self.redis_client:
@@ -522,7 +558,7 @@ class FireDetector:
 
     async def _extract_heat_source_features(self, device_id: str) -> HeatSourceFeature:
         history = self.heat_source_cache.get(device_id, [])
-        
+
         if len(history) < 3:
             return HeatSourceFeature(
                 device_id=device_id,
@@ -537,23 +573,23 @@ class FireDetector:
                 fluctuation_frequency=0.0,
                 is_periodic=False
             )
-        
+
         temps = [h[1] for h in history]
         smokes = [h[2] for h in history]
         times = [h[0] for h in history]
-        
+
         temp_max = max(temps)
         temp_min = min(temps)
         temp_mean = sum(temps) / len(temps)
         temp_std = math.sqrt(sum((t - temp_mean) ** 2 for t in temps) / len(temps))
-        
+
         temp_range = temp_max - temp_min
         temp_distribution_score = min(1.0, temp_range / settings.FIRE_TEMP_DISTRIBUTION_THRESHOLD)
-        
+
         duration_minutes = abs((times[-1] - times[0]).total_seconds()) / 60.0
-        
+
         smoke_mean = sum(smokes) / len(smokes)
-        
+
         if len(temps) >= 3 and len(smokes) >= 3:
             avg_temp = temp_mean
             avg_smoke = smoke_mean
@@ -566,12 +602,12 @@ class FireDetector:
                 correlation = 0.0
         else:
             correlation = 0.0
-        
+
         fluctuation_count = 0
         diffs = []
         for i in range(1, len(temps)):
             diffs.append(temps[i] - temps[i-1])
-        
+
         for i in range(1, len(diffs)):
             if diffs[i] * diffs[i-1] < 0:
                 window_size = min(3, i, len(diffs) - i - 1)
@@ -583,23 +619,23 @@ class FireDetector:
                     peak_to_peak = max(left_max, right_max) - min(left_min, right_min)
                 else:
                     peak_to_peak = abs(temps[i+1] - temps[i-1])
-                
+
                 if peak_to_peak > settings.FIRE_WELDING_TEMP_FLUCTUATION / 4:
                     fluctuation_count += 1
-        
+
         temp_range = temp_max - temp_min
         has_significant_range = temp_range > settings.FIRE_WELDING_TEMP_FLUCTUATION
-        
+
         has_significant_std = temp_std > settings.FIRE_WELDING_TEMP_FLUCTUATION / 2
-        
+
         if duration_minutes > 0:
             fluctuation_frequency = fluctuation_count / duration_minutes
         else:
             fluctuation_frequency = 0.0
-        
-        is_periodic = (fluctuation_frequency >= (0.5 / settings.FIRE_WELDING_CYCLE_SECONDS) or 
+
+        is_periodic = (fluctuation_frequency >= (0.5 / settings.FIRE_WELDING_CYCLE_SECONDS) or
                       (has_significant_range and has_significant_std and len(temps) >= 10))
-        
+
         return HeatSourceFeature(
             device_id=device_id,
             temperature_max=temp_max,
@@ -621,7 +657,7 @@ class FireDetector:
     ) -> WeldingDetectionResult:
         reasons = []
         scores = []
-        
+
         if features.temperature_std >= settings.FIRE_WELDING_TEMP_FLUCTUATION:
             temp_fluctuation_score = min(1.0, features.temperature_std / (settings.FIRE_WELDING_TEMP_FLUCTUATION * 2))
             scores.append(temp_fluctuation_score)
@@ -629,7 +665,7 @@ class FireDetector:
         else:
             temp_fluctuation_score = 0.0
             scores.append(0.0)
-        
+
         if features.is_periodic:
             periodicity_score = min(1.0, features.fluctuation_frequency / (120.0 / settings.FIRE_WELDING_CYCLE_SECONDS))
             scores.append(periodicity_score)
@@ -637,7 +673,7 @@ class FireDetector:
         else:
             periodicity_score = 0.0
             scores.append(0.0)
-        
+
         if features.smoke_mean < settings.FIRE_WELDING_SMOKE_THRESHOLD and features.temperature_mean > 40.0:
             smoke_level_score = 1.0 - min(1.0, features.smoke_mean / settings.FIRE_WELDING_SMOKE_THRESHOLD)
             scores.append(smoke_level_score)
@@ -645,7 +681,7 @@ class FireDetector:
         else:
             smoke_level_score = 0.0
             scores.append(0.0)
-        
+
         if features.temp_smoke_correlation < 0.3 and features.temperature_mean > 40.0:
             correlation_score = 1.0 - abs(features.temp_smoke_correlation)
             scores.append(correlation_score)
@@ -653,7 +689,7 @@ class FireDetector:
         else:
             correlation_score = 0.0
             scores.append(0.0)
-        
+
         if features.duration_minutes >= settings.FIRE_HEAT_SOURCE_DURATION_MIN and features.duration_minutes < 120:
             duration_score = 0.8
             scores.append(duration_score)
@@ -661,14 +697,14 @@ class FireDetector:
         else:
             duration_score = 0.0
             scores.append(0.0)
-        
+
         if scores:
             confidence = sum(scores) / len(scores)
         else:
             confidence = 0.0
-        
+
         is_welding = confidence >= 0.6
-        
+
         result = WeldingDetectionResult(
             device_id=device_id,
             is_welding=is_welding,
@@ -678,7 +714,7 @@ class FireDetector:
             smoke_level_score=smoke_level_score,
             reasons=reasons
         )
-        
+
         if is_welding:
             await heat_source_analysis_collection.insert_one({
                 "device_id": device_id,
@@ -689,7 +725,7 @@ class FireDetector:
                 "result": result.dict(),
                 "timestamp": datetime.utcnow()
             })
-        
+
         return result
 
     async def _create_alert_confirmation(
@@ -703,7 +739,7 @@ class FireDetector:
         risk_level: str
     ) -> FireAlertConfirmation:
         confirmation_id = f"confirm_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{device_id}"
-        
+
         confirmation = FireAlertConfirmation(
             confirmation_id=confirmation_id,
             alert_id="pending",
@@ -713,11 +749,11 @@ class FireDetector:
             requires_confirmation=True,
             timeout_seconds=settings.FIRE_HUMAN_CONFIRM_TIMEOUT
         )
-        
+
         self.pending_confirmations[confirmation_id] = confirmation
-        
-        await fire_alert_confirmations_collection.insert_one(confirmation.model_dump(exclude={"id"}))
-        
+
+        await fire_alert_confirmations_collection.insert_one(confirmation.dict(exclude={"id"}))
+
         if self.redis_client:
             await self.redis_client.publish(
                 "tunnel:fire:confirmation_required",
@@ -733,9 +769,9 @@ class FireDetector:
                     "timestamp": datetime.utcnow().isoformat()
                 })
             )
-        
+
         logger.info(f"Created fire alert confirmation: {confirmation_id}, timeout: {settings.FIRE_HUMAN_CONFIRM_TIMEOUT}s")
-        
+
         return confirmation
 
     async def confirm_fire_alert(
@@ -751,12 +787,12 @@ class FireDetector:
             if not confirmation_doc:
                 return False
             confirmation = FireAlertConfirmation(**confirmation_doc)
-        
+
         confirmation.confirmed = True
         confirmation.confirmed_by = confirmed_by
         confirmation.confirmed_at = datetime.utcnow()
         confirmation.confirmation_result = confirmation_result
-        
+
         await fire_alert_confirmations_collection.update_one(
             {"confirmation_id": confirmation_id},
             {"$set": {
@@ -766,10 +802,10 @@ class FireDetector:
                 "confirmation_result": confirmation_result
             }}
         )
-        
+
         if confirmation_id in self.pending_confirmations:
             del self.pending_confirmations[confirmation_id]
-        
+
         if self.redis_client:
             await self.redis_client.publish(
                 "tunnel:fire:confirmation_result",
@@ -781,7 +817,7 @@ class FireDetector:
                     "timestamp": datetime.utcnow().isoformat()
                 })
             )
-        
+
         if confirmed and confirmation_result == "fire_confirmed":
             alert_result = await self._create_fire_alert(
                 confirmation.chamber,
@@ -799,25 +835,25 @@ class FireDetector:
         elif not confirmed or confirmation_result == "false_alarm":
             zone_id = f"{confirmation.chamber}_{int(confirmation.distance_km / 1.0)}"
             await self.deactivate_fire_zone(zone_id)
-        
+
         logger.info(f"Fire alert confirmation {confirmation_id} processed: {confirmation_result} by {confirmed_by}")
         return True
 
     async def _check_confirmation_timeouts(self) -> None:
         now = datetime.utcnow()
         timeout_confirmations = []
-        
+
         for conf_id, confirmation in list(self.pending_confirmations.items()):
             elapsed = (now - confirmation.created_at).total_seconds()
             if elapsed >= confirmation.timeout_seconds:
                 timeout_confirmations.append((conf_id, confirmation))
-        
+
         for conf_id, confirmation in timeout_confirmations:
             confirmation.confirmed = True
             confirmation.auto_upgraded = True
             confirmation.confirmed_at = now
             confirmation.confirmation_result = "timeout_auto_upgrade"
-            
+
             await fire_alert_confirmations_collection.update_one(
                 {"confirmation_id": conf_id},
                 {"$set": {
@@ -827,9 +863,9 @@ class FireDetector:
                     "confirmation_result": "timeout_auto_upgrade"
                 }}
             )
-            
+
             del self.pending_confirmations[conf_id]
-            
+
             alert_result = await self._create_fire_alert(
                 confirmation.chamber,
                 confirmation.distance_km,
@@ -843,7 +879,7 @@ class FireDetector:
                 confirmation.distance_km,
                 alert_result["alert_id"]
             )
-            
+
             if self.redis_client:
                 await self.redis_client.publish(
                     "tunnel:fire:confirmation_timeout",
@@ -856,7 +892,7 @@ class FireDetector:
                         "timestamp": now.isoformat()
                     })
                 )
-            
+
             logger.warning(f"Fire alert confirmation {conf_id} timed out after {confirmation.timeout_seconds}s, auto-upgraded to alert")
 
     async def _auto_dismiss_alert(self, alert_id: str, reason: str) -> bool:
@@ -869,7 +905,7 @@ class FireDetector:
                 "dismissed_at": datetime.utcnow()
             }}
         )
-        
+
         if result.modified_count > 0 and self.redis_client:
             await self.redis_client.publish(
                 "tunnel:fire:alert_dismissed",
@@ -879,7 +915,7 @@ class FireDetector:
                     "timestamp": datetime.utcnow().isoformat()
                 })
             )
-        
+
         return result.modified_count > 0
 
     async def get_pending_confirmations(self) -> List[Dict[str, Any]]:
@@ -888,7 +924,7 @@ class FireDetector:
 
     async def start_listener(self):
         self.running = True
-        logger.info("Fire Detector listener started")
+        logger.info("Fire Early Warning listener started")
 
         while self.running:
             try:
@@ -908,10 +944,10 @@ class FireDetector:
                             logger.error(f"Error processing fire sensor data: {e}")
 
             except Exception as e:
-                logger.error(f"Fire Detector listener error: {e}")
+                logger.error(f"Fire Early Warning listener error: {e}")
                 await asyncio.sleep(5)
 
-        logger.info("Fire Detector listener stopped")
+        logger.info("Fire Early Warning listener stopped")
 
 
-fire_detector = FireDetector()
+fire_early_warning = FireEarlyWarning()

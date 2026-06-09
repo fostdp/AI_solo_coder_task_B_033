@@ -1,9 +1,59 @@
-class FireDetector {
+class FireEarlyWarningComponent {
     constructor() {
         this.fireAlerts = [];
         this.zoneStatus = [];
         this.fireZoneLayer = null;
         this.activeOverlay = false;
+        this.containerId = 'fire-detector';
+        this.isInitialized = false;
+    }
+
+    init(options = {}) {
+        if (this.isInitialized) return;
+
+        this.containerId = options.containerId || this.containerId;
+        this.fireAlerts = options.initialAlerts || [];
+        this.zoneStatus = options.initialZones || [];
+
+        this.bindEvents();
+        this.isInitialized = true;
+        console.log('FireEarlyWarningComponent initialized');
+    }
+
+    render() {
+        if (!this.isInitialized) {
+            this.init();
+        }
+
+        this.renderFireAlertCount();
+        this.renderZoneStats();
+        if (this.activeOverlay) {
+            this.renderFireZoneLayer();
+        }
+    }
+
+    update(data = {}) {
+        if (data.alerts !== undefined) {
+            this.fireAlerts = data.alerts;
+        }
+        if (data.zones !== undefined) {
+            this.zoneStatus = data.zones;
+        }
+        if (data.activeOverlay !== undefined) {
+            this.activeOverlay = data.activeOverlay;
+        }
+
+        this.render();
+    }
+
+    bindEvents() {
+        const toggleBtn = document.getElementById('toggle-fire-zones');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', (e) => {
+                const show = e.target.checked || e.target.dataset.show === 'true';
+                this.toggleFireZones(show);
+            });
+        }
     }
 
     async fetchFireAlerts(limit = 20) {
@@ -11,12 +61,13 @@ class FireDetector {
             const response = await fetch(`/api/fire/alerts?limit=${limit}`);
             if (response.ok) {
                 const data = await response.json();
-                this.fireAlerts = data.alerts || [];
-                this.updateFireAlertCount();
+                this.update({ alerts: data.alerts || [] });
+                return this.fireAlerts;
             }
         } catch (error) {
             console.error('Failed to fetch fire alerts:', error);
         }
+        return [];
     }
 
     async fetchZoneStatus() {
@@ -24,45 +75,43 @@ class FireDetector {
             const response = await fetch('/api/fire/zones');
             if (response.ok) {
                 const data = await response.json();
-                this.zoneStatus = data.zones || [];
-                this.updateZoneStats();
-                if (this.activeOverlay) {
-                    this.updateFireZoneLayer();
-                }
+                this.update({ zones: data.zones || [] });
+                return this.zoneStatus;
             }
         } catch (error) {
             console.error('Failed to fetch zone status:', error);
         }
+        return [];
     }
 
-    updateFireAlertCount() {
-        const activeCount = this.fireAlerts.filter(a => 
-            !a.acknowledged && 
+    renderFireAlertCount() {
+        const activeCount = this.fireAlerts.filter(a =>
+            !a.acknowledged &&
             (a.risk_level === 'critical' || a.risk_level === 'warning')
         ).length;
-        
+
         const elem = document.getElementById('fire-alert-count');
         if (elem) {
             elem.textContent = activeCount;
         }
-        
+
         const stat = document.getElementById('fire-alert-stat');
         if (stat) {
             stat.classList.toggle('has-alert', activeCount > 0);
         }
-        
+
         const faultElem = document.getElementById('fault-fire');
         if (faultElem) {
-            faultElem.textContent = this.fireAlerts.filter(a => 
+            faultElem.textContent = this.fireAlerts.filter(a =>
                 a.risk_level === 'critical' || a.risk_level === 'warning'
             ).length;
         }
     }
 
-    updateZoneStats() {
+    renderZoneStats() {
         const closedCount = this.zoneStatus.filter(z => z.status === 'closed').length;
         const totalCount = this.zoneStatus.length;
-        
+
         const elem = document.getElementById('closed-fire-zones');
         if (elem) {
             elem.textContent = `${closedCount} / ${totalCount || 16}`;
@@ -70,27 +119,26 @@ class FireDetector {
     }
 
     toggleFireZones(show) {
-        this.activeOverlay = show;
+        this.update({ activeOverlay: show });
+
         if (show) {
-            this.fetchZoneStatus().then(() => {
-                this.updateFireZoneLayer();
-            });
+            this.fetchZoneStatus();
         } else {
             this.removeFireZoneLayer();
         }
     }
 
-    updateFireZoneLayer() {
+    renderFireZoneLayer() {
         if (!window.map) return;
-        
+
         this.removeFireZoneLayer();
-        
+
         const zoneMarkers = [];
         this.zoneStatus.forEach(zone => {
             if (zone.location && zone.location.coordinates) {
                 const isClosed = zone.status === 'closed';
                 const color = isClosed ? '#ef4444' : '#22c55e';
-                
+
                 const marker = L.circleMarker(
                     [zone.location.coordinates[1], zone.location.coordinates[0]],
                     {
@@ -112,11 +160,11 @@ class FireDetector {
                     灭火装置: ${zone.extinguishers_ready || 0} / ${zone.extinguishers_total || 0}
                     ${zone.last_activation ? `<br/>最后动作: ${new Date(zone.last_activation).toLocaleString()}` : ''}
                 `);
-                
+
                 zoneMarkers.push(marker);
             }
         });
-        
+
         if (zoneMarkers.length > 0) {
             this.fireZoneLayer = L.layerGroup(zoneMarkers).addTo(window.map);
         }
@@ -129,10 +177,10 @@ class FireDetector {
         }
     }
 
-    async calculateFireProbability(deviceId) {
+    async calculateFireProbability(temperature, tempRate, smokeDensity, correlation = 0) {
         try {
             const response = await fetch(
-                `/api/fire/probability?device_id=${deviceId}`
+                `/api/fire/probability/calculate?temperature=${temperature}&temp_rate=${tempRate}&smoke_density=${smokeDensity}&correlation=${correlation}`
             );
             if (response.ok) {
                 return await response.json();
@@ -180,51 +228,33 @@ class FireDetector {
     }
 
     async activateFireResponse(zoneId) {
-        if (confirm(`确认要启动 ${zoneId} 分区的火灾响应吗？\n这将关闭防火门并启动灭火装置。`)) {
+        if (confirm(`确认要停用 ${zoneId} 防火分区吗？\n这将关闭该分区的防火门。`)) {
             try {
-                const response = await fetch('/api/fire/response/activate', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ zone_id: zoneId })
+                const response = await fetch(`/api/fire/zones/${zoneId}/deactivate`, {
+                    method: 'POST'
                 });
                 if (response.ok) {
-                    alert('火灾响应已启动');
+                    alert('防火分区已停用');
                     this.fetchZoneStatus();
                     return true;
                 }
             } catch (error) {
-                console.error('Failed to activate fire response:', error);
-                alert('启动失败');
+                console.error('Failed to deactivate fire zone:', error);
+                alert('操作失败');
             }
         }
         return false;
     }
 
     async resetZone(zoneId) {
-        if (confirm(`确认要重置 ${zoneId} 分区吗？\n这将打开防火门并重置灭火装置。`)) {
-            try {
-                const response = await fetch('/api/fire/zones/reset', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ zone_id: zoneId })
-                });
-                if (response.ok) {
-                    alert('分区已重置');
-                    this.fetchZoneStatus();
-                    return true;
-                }
-            } catch (error) {
-                console.error('Failed to reset zone:', error);
-                alert('重置失败');
-            }
-        }
+        alert('分区重置功能请通过防火门控制界面操作');
         return false;
     }
 
     getFireAlertCard(alert) {
         const color = this.getFireRiskColor(alert.risk_level);
         const time = new Date(alert.timestamp).toLocaleString();
-        
+
         return `
             <div class="alert-card fire-alert ${alert.risk_level} ${alert.acknowledged ? 'acknowledged' : ''}">
                 <div class="alert-header">
@@ -238,26 +268,26 @@ class FireDetector {
                     <div><strong>传感器:</strong> ${alert.device_id}</div>
                     <div><strong>舱室:</strong> ${alert.chamber}</div>
                     <div><strong>位置:</strong> ${alert.distance_km?.toFixed(2) || '--'} km</div>
-                    ${alert.fire_probability !== undefined ? 
+                    ${alert.fire_probability !== undefined ?
                         `<div><strong>火灾概率:</strong> ${(alert.fire_probability * 100).toFixed(1)}%</div>` : ''}
-                    ${alert.temperature !== undefined ? 
+                    ${alert.temperature !== undefined ?
                         `<div><strong>温度:</strong> ${alert.temperature.toFixed(1)}°C</div>` : ''}
-                    ${alert.temperature_rate !== undefined ? 
+                    ${alert.temperature_rate !== undefined ?
                         `<div><strong>温度变化率:</strong> ${alert.temperature_rate.toFixed(2)}°C/min</div>` : ''}
-                    ${alert.smoke_density !== undefined ? 
+                    ${alert.smoke_density !== undefined ?
                         `<div><strong>烟雾浓度:</strong> ${alert.smoke_density.toFixed(1)}%</div>` : ''}
-                    ${alert.is_equipment_overheat !== undefined ? 
+                    ${alert.is_equipment_overheat !== undefined ?
                         `<div><strong>类型:</strong> ${alert.is_equipment_overheat ? '设备过热' : '火灾征兆'}</div>` : ''}
                 </div>
                 <div class="alert-actions">
                     ${!alert.acknowledged ? `
-                        <button class="alert-btn acknowledge" 
+                        <button class="alert-btn acknowledge"
                             onclick="fireDetector.acknowledgeFireAlert('${alert.alert_id}')">
                             确认告警
                         </button>
                     ` : '<span class="acknowledged-badge">✓ 已确认</span>'}
                     ${alert.zone_id ? `
-                        <button class="alert-btn response" 
+                        <button class="alert-btn response"
                             onclick="fireDetector.activateFireResponse('${alert.zone_id}')">
                             启动响应
                         </button>
@@ -266,6 +296,17 @@ class FireDetector {
             </div>
         `;
     }
+
+    destroy() {
+        this.removeFireZoneLayer();
+        this.isInitialized = false;
+        console.log('FireEarlyWarningComponent destroyed');
+    }
 }
 
-window.fireDetector = new FireDetector();
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = FireEarlyWarningComponent;
+} else {
+    window.FireEarlyWarningComponent = FireEarlyWarningComponent;
+    window.fireDetector = new FireEarlyWarningComponent();
+}

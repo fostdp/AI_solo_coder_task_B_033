@@ -1,8 +1,9 @@
 import logging
 from fastapi import APIRouter, HTTPException, Query
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 
+from asset_manager.core import asset_manager
 from backend.models.schemas import (
     Asset,
     MaintenanceRecord,
@@ -16,7 +17,6 @@ from backend.models.database import (
     serialize_document,
     serialize_documents
 )
-from backend.modules import asset_manager
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,7 @@ async def generate_maintenance_plan(
     plan = await asset_manager.generate_monthly_maintenance_plan(year, month)
     return {
         "status": "success",
-        "plan": plan.model_dump(exclude={"id"})
+        "plan": plan.dict(exclude={"id"})
     }
 
 
@@ -187,7 +187,7 @@ async def approve_maintenance_plan(plan_id: str):
                     start_time=task["due_date"],
                     status="pending"
                 )
-                await maintenance_records_collection.insert_one(record.model_dump(exclude={"id"}))
+                await maintenance_records_collection.insert_one(record.dict(exclude={"id"}))
 
     return {"status": "success", "plan_id": plan_id, "action": "approved"}
 
@@ -400,3 +400,91 @@ async def get_maintenance_due_report(days: int = Query(30, ge=1, le=180)):
         "due_assets": due_assets,
         "count": len(due_assets)
     }
+
+
+@router.get("/replacement-history")
+async def get_device_replacement_history(
+    device_id: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=500)
+):
+    records = await asset_manager.get_device_replacement_history(device_id, limit)
+    return {
+        "records": records,
+        "count": len(records),
+        "filter": {"device_id": device_id}
+    }
+
+
+@router.get("/audit-logs")
+async def get_asset_audit_logs(
+    device_id: Optional[str] = None,
+    action: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000)
+):
+    logs = await asset_manager.get_asset_audit_logs(device_id, action, limit)
+    return {
+        "logs": logs,
+        "count": len(logs),
+        "filters": {
+            "device_id": device_id,
+            "action": action
+        }
+    }
+
+
+@router.post("/{device_id}/replace")
+async def manual_device_replacement(
+    device_id: str,
+    replacement_data: Dict[str, Any]
+):
+    new_asset_data = replacement_data.get("new_asset", {})
+    replacement_reason = replacement_data.get("reason", "manual_replacement")
+    performed_by = replacement_data.get("performed_by", "user")
+
+    success, replacement_record = await asset_manager.manual_device_replacement(
+        device_id,
+        new_asset_data,
+        replacement_reason,
+        performed_by
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to process device replacement"
+        )
+
+    return {
+        "status": "success",
+        "old_device_id": device_id,
+        "new_device_id": replacement_record.new_device_id if replacement_record else None,
+        "record_id": replacement_record.record_id if replacement_record else None
+    }
+
+
+@router.post("/scan-replacements")
+async def scan_for_device_replacements():
+    try:
+        replaced_devices = await asset_manager.scan_for_device_replacements()
+        return {
+            "status": "success",
+            "replaced_devices": replaced_devices,
+            "count": len(replaced_devices)
+        }
+    except Exception as e:
+        logger.error(f"Error scanning for device replacements: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{device_id}/replacement-chain")
+async def get_replacement_chain(device_id: str):
+    try:
+        chain = await asset_manager.get_replacement_chain(device_id)
+        return {
+            "device_id": device_id,
+            "replacement_chain": chain,
+            "chain_length": len(chain)
+        }
+    except Exception as e:
+        logger.error(f"Error getting replacement chain: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

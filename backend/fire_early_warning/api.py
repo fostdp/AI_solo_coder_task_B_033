@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
 from datetime import datetime, timedelta
 
+from backend.config import settings
 from backend.models.schemas import FireSensorData
 from backend.models.database import (
     fire_alerts_collection,
@@ -11,7 +12,14 @@ from backend.models.database import (
     serialize_document,
     serialize_documents
 )
-from backend.modules import fire_detector
+from fire_early_warning.core import fire_early_warning
+from fire_early_warning.inference_service import (
+    is_service_running,
+    get_service_status,
+    start_inference_service,
+    stop_inference_service,
+    call_inference_service
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +28,7 @@ router = APIRouter(prefix="/api/fire", tags=["fire"])
 
 @router.post("/data")
 async def receive_fire_sensor_data(data: FireSensorData):
-    result = await fire_detector.process_fire_sensor_data(data)
+    result = await fire_early_warning.process_fire_sensor_data(data)
 
     if result.get("status") == "error":
         raise HTTPException(status_code=400, detail=result.get("message", "Unknown error"))
@@ -36,7 +44,7 @@ async def receive_fire_sensor_batch(datas: List[FireSensorData]):
     results = []
     for data in datas:
         try:
-            result = await fire_detector.process_fire_sensor_data(data)
+            result = await fire_early_warning.process_fire_sensor_data(data)
             results.append(result)
         except Exception as e:
             logger.error(f"Error processing fire data {data.device_id}: {e}")
@@ -56,7 +64,7 @@ async def receive_fire_sensor_batch(datas: List[FireSensorData]):
 async def get_active_fire_alerts(
     limit: int = Query(20, ge=1, le=100)
 ):
-    alerts = await fire_detector.get_active_fire_alerts(limit)
+    alerts = await fire_early_warning.get_active_fire_alerts(limit)
     return {
         "alerts": alerts,
         "count": len(alerts)
@@ -96,7 +104,7 @@ async def get_fire_alerts(
 
 @router.post("/alerts/{alert_id}/acknowledge")
 async def acknowledge_fire_alert(alert_id: str):
-    success = await fire_detector.acknowledge_fire_alert(alert_id)
+    success = await fire_early_warning.acknowledge_fire_alert(alert_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
     return {"status": "success", "alert_id": alert_id}
@@ -106,7 +114,7 @@ async def acknowledge_fire_alert(alert_id: str):
 async def get_fire_zones(
     chamber: Optional[str] = None
 ):
-    zones = await fire_detector.get_fire_zone_status(chamber)
+    zones = await fire_early_warning.get_fire_zone_status(chamber)
     return {
         "zones": zones,
         "count": len(zones)
@@ -115,7 +123,7 @@ async def get_fire_zones(
 
 @router.post("/zones/{zone_id}/deactivate")
 async def deactivate_fire_zone(zone_id: str):
-    success = await fire_detector.deactivate_fire_zone(zone_id)
+    success = await fire_early_warning.deactivate_fire_zone(zone_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Zone {zone_id} not found")
     return {"status": "success", "zone_id": zone_id}
@@ -255,12 +263,28 @@ async def calculate_fire_probability(
     smoke_density: float = Query(..., ge=0),
     correlation: float = Query(0, ge=-1, le=1)
 ):
-    probability = fire_detector.bayesian_detector.calculate_fire_probability(
-        temperature=temperature,
-        temp_rate=temp_rate,
-        smoke_density=smoke_density,
-        temp_smoke_correlation=correlation
-    )
+    probability = None
+
+    if is_service_running():
+        try:
+            result = await call_inference_service(
+                temperature=temperature,
+                temp_rate=temp_rate,
+                smoke_density=smoke_density,
+                temp_smoke_correlation=correlation
+            )
+            if result and result.get("success"):
+                probability = result["fire_probability"]
+        except Exception as e:
+            logger.warning(f"Inference service call failed, using local: {e}")
+
+    if probability is None:
+        probability = fire_early_warning.bayesian_detector.calculate_fire_probability(
+            temperature=temperature,
+            temp_rate=temp_rate,
+            smoke_density=smoke_density,
+            temp_smoke_correlation=correlation
+        )
 
     risk_level = "normal"
     if probability >= 0.9:
@@ -278,4 +302,62 @@ async def calculate_fire_probability(
         "fire_probability": probability,
         "risk_level": risk_level,
         "threshold": settings.FIRE_PROBABILITY_THRESHOLD
+    }
+
+
+@router.get("/inference-service/status")
+async def get_inference_service_status():
+    return {
+        "service_running": is_service_running(),
+        "status": get_service_status()
+    }
+
+
+@router.post("/inference-service/start")
+async def start_inference():
+    success = start_inference_service()
+    if success:
+        return {"status": "success", "message": "Fire inference service started"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to start fire inference service")
+
+
+@router.post("/inference-service/stop")
+async def stop_inference():
+    success = stop_inference_service()
+    if success:
+        return {"status": "success", "message": "Fire inference service stopped"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to stop fire inference service")
+
+
+@router.get("/confirmations/pending")
+async def get_pending_confirmations():
+    confirmations = await fire_early_warning.get_pending_confirmations()
+    return {
+        "confirmations": confirmations,
+        "count": len(confirmations)
+    }
+
+
+@router.post("/confirmations/{confirmation_id}/confirm")
+async def confirm_alert(
+    confirmation_id: str,
+    confirmed: bool = True,
+    confirmed_by: str = "system",
+    confirmation_result: str = "fire_confirmed"
+):
+    success = await fire_early_warning.confirm_fire_alert(
+        confirmation_id=confirmation_id,
+        confirmed=confirmed,
+        confirmed_by=confirmed_by,
+        confirmation_result=confirmation_result
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Confirmation {confirmation_id} not found")
+    return {
+        "status": "success",
+        "confirmation_id": confirmation_id,
+        "confirmed": confirmed,
+        "confirmation_result": confirmation_result
     }

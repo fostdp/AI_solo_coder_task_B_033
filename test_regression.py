@@ -572,9 +572,31 @@ def test_python_syntax_all_files():
         "backend/modules/alarm_manager.py",
         "backend/modules/__init__.py",
         "backend/routes/sensor.py",
+        "backend/routes/devices.py",
+        "backend/routes/alerts.py",
+        "backend/routes/control.py",
+        "backend/routes/stats.py",
         "backend/services/control_service.py",
         "backend/services/alert_service.py",
-        "backend/control/ventilation_pid.py"
+        "backend/control/ventilation_pid.py",
+        "backend/structural_monitor/__init__.py",
+        "backend/structural_monitor/core.py",
+        "backend/structural_monitor/api.py",
+        "backend/structural_monitor/models.py",
+        "backend/robot_planner/__init__.py",
+        "backend/robot_planner/core.py",
+        "backend/robot_planner/api.py",
+        "backend/robot_planner/models.py",
+        "backend/robot_planner/path_process.py",
+        "backend/fire_early_warning/__init__.py",
+        "backend/fire_early_warning/core.py",
+        "backend/fire_early_warning/api.py",
+        "backend/fire_early_warning/models.py",
+        "backend/fire_early_warning/inference_service.py",
+        "backend/asset_manager/__init__.py",
+        "backend/asset_manager/core.py",
+        "backend/asset_manager/api.py",
+        "backend/asset_manager/models.py"
     ]
     
     import py_compile
@@ -586,6 +608,238 @@ def test_python_syntax_all_files():
             raise AssertionError(f"Syntax error in {py_file}: {e}")
     
     logger.info("All Python files syntax correct")
+    return True
+
+
+def test_structural_monitor_module():
+    sm_core = load_source("backend/structural_monitor/core.py")
+    sm_api = load_source("backend/structural_monitor/api.py")
+    
+    assert "class StructureMonitor" in sm_core, "StructureMonitor class missing"
+    assert "class StructureHeatmapPoint" in sm_core or "StructureHeatmapPoint" in sm_core, "Heatmap model missing"
+    assert "process_fiber_data" in sm_core, "process_fiber_data method missing"
+    assert "get_heatmap_data" in sm_core, "get_heatmap_data method missing"
+    assert "get_active_alerts" in sm_core, "get_active_alerts method missing"
+    assert "connect_redis" in sm_core, "connect_redis method missing"
+    assert "start_listener" in sm_core, "start_listener method missing"
+    assert "structure_monitor = StructureMonitor()" in sm_core, "Module instance missing"
+    
+    assert "router = APIRouter(prefix=\"/api/structure\"" in sm_api, "API router prefix incorrect"
+    assert "from structural_monitor.core import structure_monitor" in sm_api, "Core import missing in API"
+    
+    api_endpoints = [
+        "/data",
+        "/data/batch",
+        "/heatmap",
+        "/alerts/active",
+        "/alerts",
+        "/trend",
+        "/statistics"
+    ]
+    for endpoint in api_endpoints:
+        assert endpoint in sm_api, f"API endpoint missing: {endpoint}"
+    
+    logger.info("StructuralMonitor module structure correct")
+    return True
+
+
+def test_robot_planner_module():
+    rp_core = load_source("backend/robot_planner/core.py")
+    rp_api = load_source("backend/robot_planner/api.py")
+    rp_process = load_source("backend/robot_planner/path_process.py")
+    
+    assert "class RobotPlanner" in rp_core, "RobotPlanner class missing"
+    assert "plan_path" in rp_core, "plan_path method missing"
+    assert "get_all_robots" in rp_core, "get_all_robots method missing"
+    assert "update_robot_position" in rp_core, "update_robot_position method missing"
+    assert "start_control_loop" in rp_core, "start_control_loop method missing"
+    assert "robot_planner = RobotPlanner()" in rp_core, "Module instance missing"
+    
+    assert "multiprocessing.Process" in rp_process, "Multiprocessing usage missing"
+    assert "start_path_planner_process" in rp_process, "start_path_planner_process function missing"
+    assert "stop_path_planner_process" in rp_process, "stop_path_planner_process function missing"
+    assert "is_process_running" in rp_process, "is_process_running function missing"
+    assert "send_path_planning_request" in rp_process, "send_path_planning_request function missing"
+    assert "_astar_path_planning" in rp_process, "A* path planning function missing"
+    
+    assert "from robot_planner.path_process import" in rp_api, "Path process import missing in API"
+    assert "/path-planner/status" in rp_api, "Path planner status endpoint missing"
+    
+    logger.info("RobotPlanner module structure correct (with independent path planning process)")
+    return True
+
+
+def test_fire_early_warning_module():
+    few_core = load_source("backend/fire_early_warning/core.py")
+    few_api = load_source("backend/fire_early_warning/api.py")
+    few_inference = load_source("backend/fire_early_warning/inference_service.py")
+    
+    assert "class FireEarlyWarning" in few_core, "FireEarlyWarning class missing"
+    assert "class BayesianFireDetector" in few_core, "BayesianFireDetector class missing"
+    assert "process_fire_sensor_data" in few_core, "process_fire_sensor_data method missing"
+    assert "calculate_fire_probability" in few_core, "calculate_fire_probability method missing"
+    assert "use_inference_service" in few_core, "use_inference_service flag missing"
+    assert "fire_early_warning = FireEarlyWarning()" in few_core, "Module instance missing"
+    
+    assert "call_inference_service" in few_core, "Inference service call missing"
+    assert "is_service_running()" in few_core, "Service running check missing"
+    
+    assert "multiprocessing.Process" in few_inference, "Multiprocessing usage missing"
+    assert "start_inference_service" in few_inference, "start_inference_service function missing"
+    assert "stop_inference_service" in few_inference, "stop_inference_service function missing"
+    assert "call_inference_service" in few_inference, "call_inference_service function missing"
+    assert "BayesianFireDetector" in few_inference, "Bayesian detector in inference service missing"
+    assert "FastAPI" in few_inference, "FastAPI for inference service missing"
+    
+    assert "from fire_early_warning.inference_service import" in few_api, "Inference service import missing in API"
+    assert "/inference-service/status" in few_api, "Inference service status endpoint missing"
+    
+    logger.info("FireEarlyWarning module structure correct (with independent inference service)")
+    return True
+
+
+def test_asset_manager_module():
+    am_core = load_source("backend/asset_manager/core.py")
+    am_api = load_source("backend/asset_manager/api.py")
+    
+    assert "class AssetManager" in am_core, "AssetManager class missing"
+    assert "class LifePredictionModel" in am_core, "LifePredictionModel class missing"
+    assert "create_asset" in am_core, "create_asset method missing"
+    assert "get_asset" in am_core, "get_asset method missing"
+    assert "predict_remaining_life" in am_core, "predict_remaining_life method missing"
+    assert "generate_monthly_maintenance_plan" in am_core, "generate_monthly_maintenance_plan method missing"
+    assert "scan_for_device_replacements" in am_core, "scan_for_device_replacements method missing"
+    assert "asset_manager = AssetManager()" in am_core, "Module instance missing"
+    
+    assert "router = APIRouter(prefix=\"/api/assets\"" in am_api, "API router prefix incorrect"
+    assert "from asset_manager.core import asset_manager" in am_api, "Core import missing in API"
+    
+    api_endpoints = [
+        "/statistics",
+        "/life-predictions",
+        "/reports/warranty",
+        "/reports/maintenance-due",
+        "/maintenance-plans/generate",
+        "/maintenance-plans/{plan_id}/approve",
+        "/replacement-history",
+        "/scan-replacements"
+    ]
+    for endpoint in api_endpoints:
+        assert endpoint in am_api, f"API endpoint missing: {endpoint}"
+    
+    logger.info("AssetManager module structure correct")
+    return True
+
+
+def test_frontend_new_components():
+    sm_js = load_source("frontend/js/structure_monitor.js")
+    rp_js = load_source("frontend/js/robot_inspector.js")
+    few_js = load_source("frontend/js/fire_detector.js")
+    am_js = load_source("frontend/js/asset_manager.js")
+    
+    assert "class StructuralMonitorComponent" in sm_js, "StructuralMonitorComponent class missing"
+    assert "fetchHeatmapData" in sm_js, "fetchHeatmapData method missing"
+    assert "window.StructuralMonitorComponent" in sm_js, "Global export missing"
+    
+    assert "class RobotPlannerComponent" in rp_js, "RobotPlannerComponent class missing"
+    assert "fetchRobots" in rp_js, "fetchRobots method missing"
+    assert "window.RobotPlannerComponent" in rp_js, "Global export missing"
+    
+    assert "class FireEarlyWarningComponent" in few_js, "FireEarlyWarningComponent class missing"
+    assert "fetchFireAlerts" in few_js, "fetchFireAlerts method missing"
+    assert "window.FireEarlyWarningComponent" in few_js, "Global export missing"
+    
+    assert "class AssetManagerComponent" in am_js, "AssetManagerComponent class missing"
+    assert "fetchAssets" in am_js, "fetchAssets method missing"
+    assert "new Chart(" in am_js, "Chart.js integration missing"
+    assert "window.AssetManagerComponent" in am_js, "Global export missing"
+    
+    logger.info("All new frontend components structure correct")
+    return True
+
+
+def test_config_new_features():
+    config_source = load_source("backend/config.py")
+    
+    new_configs = [
+        "FIRE_INFERENCE_SERVICE_PORT",
+        "ROBOT_PATH_PLANNER_PROCESS_PORT",
+        "FIRE_PROBABILITY_THRESHOLD",
+        "ASSET_REPLACEMENT_SERIAL_CHANGE",
+        "NUM_FIBER_SENSORS",
+        "NUM_INSPECTION_ROBOTS",
+        "NUM_SMOKE_SENSORS"
+    ]
+    
+    for config in new_configs:
+        assert config in config_source, f"New config missing: {config}"
+    
+    logger.info("All new feature configurations present")
+    return True
+
+
+def test_main_py_new_modules():
+    main_source = load_source("backend/main.py")
+    
+    new_import_modules = [
+        "from structural_monitor.core",
+        "from structural_monitor.api",
+        "from robot_planner.core",
+        "from robot_planner.api",
+        "from robot_planner.path_process",
+        "from fire_early_warning.core",
+        "from fire_early_warning.api",
+        "from fire_early_warning.inference_service",
+        "from asset_manager.core",
+        "from asset_manager.api"
+    ]
+    
+    for imp in new_import_modules:
+        assert imp in main_source, f"Missing new module import: {imp}"
+    
+    imported_symbols = [
+        "structure_monitor",
+        "router as structure_router",
+        "robot_planner",
+        "router as robots_router",
+        "start_path_planner_process",
+        "stop_path_planner_process",
+        "fire_early_warning",
+        "router as fire_router",
+        "start_inference_service",
+        "stop_inference_service",
+        "asset_manager",
+        "router as assets_router"
+    ]
+    
+    for sym in imported_symbols:
+        assert sym in main_source, f"Missing imported symbol: {sym}"
+    
+    lifespan_operations = [
+        "start_path_planner_process()",
+        "start_inference_service()",
+        "stop_path_planner_process()",
+        "stop_inference_service()",
+        "structure_monitor.connect_redis()",
+        "robot_planner.connect_redis()",
+        "fire_early_warning.connect_redis()",
+        "asset_manager.connect_redis()"
+    ]
+    
+    for op in lifespan_operations:
+        assert op in main_source, f"Missing lifespan operation: {op}"
+    
+    router_registrations = [
+        "app.include_router(structure_router)",
+        "app.include_router(robots_router)",
+        "app.include_router(fire_router)",
+        "app.include_router(assets_router)"
+    ]
+    
+    for reg in router_registrations:
+        assert reg in main_source, f"Missing router registration: {reg}"
+    
+    logger.info("main.py new modules integration correct")
     return True
 
 
@@ -601,30 +855,37 @@ def main():
     suite.run_test("2. Membership Function Definitions", test_membership_function_definitions)
     suite.run_test("3. Redis Pub/Sub Channels", test_redis_pubsub_channels)
     suite.run_test("4. requirements.txt", test_requirements_txt)
+    suite.run_test("4.1 New Feature Configs", test_config_new_features)
     
     logger.info("\n--- Backend Module Structure Tests ---")
     suite.run_test("5. LoraReceiver Module", test_lora_receiver_module)
     suite.run_test("6. PumpController Module", test_pump_controller_module)
     suite.run_test("7. AlarmManager Module", test_alarm_manager_module)
     suite.run_test("8. Fuzzy Inference Logic (Static)", test_fuzzy_inference_logic_static)
+    suite.run_test("9. StructuralMonitor Module", test_structural_monitor_module)
+    suite.run_test("10. RobotPlanner Module (Independent Process)", test_robot_planner_module)
+    suite.run_test("11. FireEarlyWarning Module (Inference Service)", test_fire_early_warning_module)
+    suite.run_test("12. AssetManager Module", test_asset_manager_module)
     
     logger.info("\n--- Integration Tests ---")
-    suite.run_test("9. main.py Module Integration", test_main_py_module_integration)
-    suite.run_test("10. sensor.py Route Refactoring", test_sensor_route_refactoring)
+    suite.run_test("13. main.py Module Integration", test_main_py_module_integration)
+    suite.run_test("14. main.py New Modules Integration", test_main_py_new_modules)
+    suite.run_test("15. sensor.py Route Refactoring", test_sensor_route_refactoring)
     
     logger.info("\n--- Frontend Component Tests ---")
-    suite.run_test("11. CorridorMap Component", test_frontend_corridor_map_component)
-    suite.run_test("12. DeviceDetail Component", test_frontend_device_detail_component)
-    suite.run_test("13. Frontend App Integration", test_frontend_app_integration)
-    suite.run_test("14. index.html Script Order", test_frontend_index_html)
+    suite.run_test("16. CorridorMap Component", test_frontend_corridor_map_component)
+    suite.run_test("17. DeviceDetail Component", test_frontend_device_detail_component)
+    suite.run_test("18. Frontend App Integration", test_frontend_app_integration)
+    suite.run_test("19. index.html Script Order", test_frontend_index_html)
+    suite.run_test("20. New Feature Components", test_frontend_new_components)
     
     logger.info("\n--- Performance & Optimization Tests ---")
-    suite.run_test("15. Ventilation Chamber Grouping", test_ventilation_chamber_grouping)
-    suite.run_test("16. MongoDB Batch Operations", test_mongodb_batch_operations)
-    suite.run_test("17. SMS Cost Optimization", test_sms_cost_optimization)
+    suite.run_test("21. Ventilation Chamber Grouping", test_ventilation_chamber_grouping)
+    suite.run_test("22. MongoDB Batch Operations", test_mongodb_batch_operations)
+    suite.run_test("23. SMS Cost Optimization", test_sms_cost_optimization)
     
     logger.info("\n--- Syntax Validation ---")
-    suite.run_test("18. Python Syntax All Files", test_python_syntax_all_files)
+    suite.run_test("24. Python Syntax All Files", test_python_syntax_all_files)
     
     success = suite.print_summary()
     

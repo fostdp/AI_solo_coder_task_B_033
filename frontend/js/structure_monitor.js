@@ -1,9 +1,58 @@
-class StructureMonitor {
+class StructuralMonitorComponent {
     constructor() {
         this.heatmapLayer = null;
         this.heatmapData = [];
         this.structureAlerts = [];
         this.activeOverlay = false;
+        this.containerId = 'structure-monitor';
+        this.isInitialized = false;
+    }
+
+    init(options = {}) {
+        if (this.isInitialized) return;
+
+        this.containerId = options.containerId || this.containerId;
+        this.heatmapData = options.initialData || [];
+        this.structureAlerts = options.initialAlerts || [];
+
+        this.bindEvents();
+        this.isInitialized = true;
+        console.log('StructuralMonitorComponent initialized');
+    }
+
+    render() {
+        if (!this.isInitialized) {
+            this.init();
+        }
+
+        this.renderAlertCount();
+        if (this.activeOverlay) {
+            this.renderHeatmap();
+        }
+    }
+
+    update(data = {}) {
+        if (data.heatmapData !== undefined) {
+            this.heatmapData = data.heatmapData;
+        }
+        if (data.alerts !== undefined) {
+            this.structureAlerts = data.alerts;
+        }
+        if (data.activeOverlay !== undefined) {
+            this.activeOverlay = data.activeOverlay;
+        }
+
+        this.render();
+    }
+
+    bindEvents() {
+        const toggleBtn = document.getElementById('toggle-heatmap');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', (e) => {
+                const show = e.target.checked || e.target.dataset.show === 'true';
+                this.toggleHeatmap(show);
+            });
+        }
     }
 
     async fetchHeatmapData() {
@@ -12,9 +61,7 @@ class StructureMonitor {
             if (response.ok) {
                 const data = await response.json();
                 this.heatmapData = data.heatmap || [];
-                if (this.activeOverlay) {
-                    this.updateHeatmapLayer();
-                }
+                this.update({ heatmapData: this.heatmapData });
             }
         } catch (error) {
             console.error('Failed to fetch structure heatmap:', error);
@@ -27,21 +74,23 @@ class StructureMonitor {
             if (response.ok) {
                 const data = await response.json();
                 this.structureAlerts = data.alerts || [];
-                this.updateStructureAlertCount();
+                this.update({ alerts: this.structureAlerts });
             }
         } catch (error) {
             console.error('Failed to fetch structure alerts:', error);
         }
     }
 
-    updateStructureAlertCount() {
-        const criticalCount = this.structureAlerts.filter(a => 
+    renderAlertCount() {
+        const criticalCount = this.structureAlerts.filter(a =>
             a.risk_level === 'critical' || a.risk_level === 'warning'
         ).length;
+
         const elem = document.getElementById('structure-alert-count');
         if (elem) {
             elem.textContent = criticalCount;
         }
+
         const stat = document.getElementById('structure-alert-stat');
         if (stat) {
             stat.classList.toggle('has-alert', criticalCount > 0);
@@ -49,20 +98,19 @@ class StructureMonitor {
     }
 
     toggleHeatmap(show) {
-        this.activeOverlay = show;
+        this.update({ activeOverlay: show });
+
         if (show) {
-            this.fetchHeatmapData().then(() => {
-                this.updateHeatmapLayer();
-            });
+            this.fetchHeatmapData();
         } else {
             this.removeHeatmapLayer();
         }
     }
 
-    updateHeatmapLayer() {
+    renderHeatmap() {
         if (window.map && this.heatmapData.length > 0) {
             this.removeHeatmapLayer();
-            
+
             const heatMapPoints = this.heatmapData.map(point => {
                 const riskColor = this.getRiskColor(point.risk_level);
                 return L.circleMarker([point.location.coordinates[1], point.location.coordinates[0]], {
@@ -80,7 +128,7 @@ class StructureMonitor {
                     风险等级: <span style="color: ${riskColor}; font-weight: bold;">${point.risk_level}</span>
                 `);
             });
-            
+
             this.heatmapLayer = L.layerGroup(heatMapPoints).addTo(window.map);
         }
     }
@@ -115,6 +163,17 @@ class StructureMonitor {
         }
         return null;
     }
+
+    destroy() {
+        this.removeHeatmapLayer();
+        this.isInitialized = false;
+        console.log('StructuralMonitorComponent destroyed');
+    }
 }
 
-window.structureMonitor = new StructureMonitor();
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = StructuralMonitorComponent;
+} else {
+    window.StructuralMonitorComponent = StructuralMonitorComponent;
+    window.structureMonitor = new StructuralMonitorComponent();
+}

@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Tuple
 from collections import deque
 from dataclasses import dataclass, field
 
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'backend'))
 
 logging.basicConfig(
@@ -2466,6 +2467,258 @@ def test_device_replacement_chain_tracking():
     return True
 
 
+# ========== New Feature Tests: Process & Service ==========
+
+def test_robot_path_planner_process_communication():
+    """测试机器人独立进程通信 - 进程启动、请求响应、进程停止"""
+    import multiprocessing
+    from multiprocessing import Queue
+    import time
+
+    from robot_planner.path_process import (
+        start_path_planner_process,
+        stop_path_planner_process,
+        is_process_running,
+        send_path_planning_request,
+        get_process_status
+    )
+
+    logger.info("Testing robot path planner process communication...")
+
+    try:
+        assert is_process_running() == False, "Process should not be running initially"
+
+        started = start_path_planner_process()
+        assert started == True, "Process should start successfully"
+
+        time.sleep(2)
+
+        assert is_process_running() == True, "Process should be running after start"
+
+        status = get_process_status()
+        assert status is not None, "Should get process status"
+        assert "running" in status, "Status should contain running state"
+        assert "pid" in status, "Status should contain PID"
+
+        request_data = {
+            "start_km": 0.0,
+            "end_km": 5.0,
+            "chamber": "电力舱",
+            "avoid_hazardous": True,
+            "inspection_points": [1.0, 2.5, 4.0]
+        }
+
+        response = send_path_planning_request(request_data, timeout=10)
+        assert response is not None, "Should get response from process"
+        assert "status" in response, "Response should contain status"
+
+        if response.get("status") == "success":
+            assert "path" in response, "Success response should contain path"
+            assert "waypoints" in response, "Success response should contain waypoints"
+            assert len(response["path"]) > 0, "Path should not be empty"
+            logger.info(f"Path planning successful, {len(response['path'])} points")
+        else:
+            logger.warning(f"Path planning returned status: {response.get('status')}")
+
+        status_after = get_process_status()
+        assert status_after.get("requests_processed", 0) >= 1, "Should have processed at least 1 request"
+
+        stopped = stop_path_planner_process()
+        assert stopped == True, "Process should stop successfully"
+
+        time.sleep(1)
+
+        assert is_process_running() == False, "Process should not be running after stop"
+
+        logger.info("Robot path planner process communication test PASSED")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error in process communication test: {e}")
+        try:
+            stop_path_planner_process()
+        except:
+            pass
+        raise
+
+
+def test_fire_inference_service_api():
+    """测试贝叶斯推理服务 API - 服务启动、HTTP请求、响应格式"""
+    import time
+    import httpx
+
+    from fire_early_warning.inference_service import (
+        start_inference_service,
+        stop_inference_service,
+        is_service_running,
+        call_inference_service,
+        get_service_status
+    )
+    from backend.config import settings
+
+    logger.info("Testing fire inference service API...")
+
+    try:
+        assert is_service_running() == False, "Service should not be running initially"
+
+        started = start_inference_service(port=settings.FIRE_INFERENCE_SERVICE_PORT)
+        assert started == True, "Service should start successfully"
+
+        time.sleep(3)
+
+        assert is_service_running() == True, "Service should be running after start"
+
+        status = get_service_status()
+        assert status is not None, "Should get service status"
+        assert status.get("running") == True, "Service status should indicate running"
+        assert "port" in status, "Status should contain port"
+        assert status["port"] == settings.FIRE_INFERENCE_SERVICE_PORT, "Port should match"
+
+        request_data = {
+            "temperature": 65.0,
+            "temp_rate": 8.0,
+            "smoke_density": 12.0,
+            "temp_smoke_correlation": 0.85
+        }
+
+        response = call_inference_service(
+            request_data,
+            timeout=settings.FIRE_INFERENCE_SERVICE_TIMEOUT
+        )
+
+        assert response is not None, "Should get response from service"
+        assert "fire_probability" in response, "Response should contain fire_probability"
+        assert "risk_level" in response, "Response should contain risk_level"
+        assert "confidence" in response, "Response should contain confidence"
+
+        fire_prob = response["fire_probability"]
+        assert 0.0 <= fire_prob <= 1.0, f"Fire probability {fire_prob} should be between 0 and 1"
+        assert isinstance(fire_prob, float), "Fire probability should be float"
+
+        risk_level = response["risk_level"]
+        assert risk_level in ["normal", "monitoring", "warning", "critical"], \
+            f"Invalid risk level: {risk_level}"
+
+        logger.info(f"Inference result: probability={fire_prob:.4f}, risk={risk_level}")
+
+        async def test_direct_http_call():
+            url = f"http://{settings.FIRE_INFERENCE_SERVICE_HOST}:{settings.FIRE_INFERENCE_SERVICE_PORT}/api/v1/inference/fire_probability"
+            async with httpx.AsyncClient() as client:
+                http_response = await client.post(
+                    url,
+                    json=request_data,
+                    timeout=settings.FIRE_INFERENCE_SERVICE_TIMEOUT
+                )
+                assert http_response.status_code == 200, f"HTTP status should be 200, got {http_response.status_code}"
+                data = http_response.json()
+                assert "fire_probability" in data, "HTTP response should contain fire_probability"
+                assert data["fire_probability"] == fire_prob, "HTTP response should match direct call"
+                return True
+
+        import asyncio
+        asyncio.run(test_direct_http_call())
+
+        stopped = stop_inference_service()
+        assert stopped == True, "Service should stop successfully"
+
+        time.sleep(1)
+
+        assert is_service_running() == False, "Service should not be running after stop"
+
+        logger.info("Fire inference service API test PASSED")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error in inference service test: {e}")
+        try:
+            stop_inference_service()
+        except:
+            pass
+        raise
+
+
+def test_interprocess_communication_performance():
+    """测试进程间通信性能 - 响应时间应小于100ms"""
+    import time
+    import multiprocessing
+    from multiprocessing import Queue, Process
+
+    logger.info("Testing interprocess communication performance...")
+
+    def worker_process(request_queue, response_queue):
+        while True:
+            try:
+                request = request_queue.get(timeout=1)
+                if request == "STOP":
+                    break
+                start_time = time.perf_counter()
+                result = {
+                    "request_id": request.get("request_id"),
+                    "data": request.get("data"),
+                    "processed": True,
+                    "processing_time_ms": (time.perf_counter() - start_time) * 1000
+                }
+                response_queue.put(result)
+            except:
+                continue
+
+    request_queue = Queue()
+    response_queue = Queue()
+
+    process = Process(target=worker_process, args=(request_queue, response_queue))
+    process.start()
+
+    try:
+        num_requests = 100
+        latencies = []
+
+        for i in range(num_requests):
+            request_data = {
+                "request_id": i,
+                "data": {
+                    "start_km": i * 0.1,
+                    "end_km": i * 0.1 + 1.0,
+                    "timestamp": time.time()
+                }
+            }
+
+            start_time = time.perf_counter()
+            request_queue.put(request_data)
+
+            response = response_queue.get(timeout=5)
+            end_time = time.perf_counter()
+
+            latency_ms = (end_time - start_time) * 1000
+            latencies.append(latency_ms)
+
+            assert response is not None, f"Request {i} should get response"
+            assert response["request_id"] == i, f"Request {i} ID should match"
+
+        process.terminate()
+        process.join(timeout=5)
+
+        avg_latency = sum(latencies) / len(latencies)
+        max_latency = max(latencies)
+        min_latency = min(latencies)
+        p95_latency = sorted(latencies)[int(len(latencies) * 0.95)]
+
+        logger.info(f"IPC Performance: avg={avg_latency:.2f}ms, p95={p95_latency:.2f}ms, max={max_latency:.2f}ms, min={min_latency:.2f}ms")
+
+        assert avg_latency < 100.0, f"Average latency {avg_latency:.2f}ms should be < 100ms"
+        assert p95_latency < 100.0, f"P95 latency {p95_latency:.2f}ms should be < 100ms"
+        assert max_latency < 500.0, f"Max latency {max_latency:.2f}ms should be < 500ms"
+
+        logger.info(f"Interprocess communication performance test PASSED with {num_requests} requests")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error in IPC performance test: {e}")
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        raise
+
+
 if __name__ == "__main__":
     suite = FeatureTestSuite()
     
@@ -2537,6 +2790,14 @@ if __name__ == "__main__":
     suite.run_test("资产台账自动同步 - 正常", test_asset_ledger_auto_sync_normal, "资产管理")
     suite.run_test("资产审计日志 - 正常", test_asset_audit_logging_normal, "资产管理")
     suite.run_test("设备更换链跟踪 - 边界", test_device_replacement_chain_tracking, "资产管理")
+
+    logger.info("\n" + "=" * 80)
+    logger.info("RUNNING PROCESS & SERVICE TESTS")
+    logger.info("=" * 80)
+
+    suite.run_test("机器人独立进程通信", test_robot_path_planner_process_communication, "进程服务")
+    suite.run_test("贝叶斯推理服务API", test_fire_inference_service_api, "进程服务")
+    suite.run_test("进程间通信性能", test_interprocess_communication_performance, "进程服务")
     
     all_passed = suite.print_summary()
     
