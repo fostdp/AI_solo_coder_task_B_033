@@ -42,5 +42,34 @@ class Settings(BaseModel):
     FANS_PER_CHAMBER: int = 10
     CHAMBERS: list = ["电力舱", "水信舱", "燃气舱", "综合"]
 
+    NUM_FIBER_SENSORS: int = 100
+    NUM_SMOKE_SENSORS: int = 60
+    NUM_INSPECTION_ROBOTS: int = 5
+    NUM_FIRE_DOORS: int = 16
+    NUM_FIRE_EXTINGUISHERS: int = 50
+
+    STRUCTURE_STRAIN_WARNING: float = 200.0
+    STRUCTURE_STRAIN_ALARM: float = 400.0
+    STRUCTURE_CRACK_WARNING: float = 0.2
+    STRUCTURE_CRACK_ALARM: float = 0.5
+
+    FIRE_TEMP_RATE_WARNING: float = 2.0
+    FIRE_TEMP_RATE_ALARM: float = 5.0
+    FIRE_SMOKE_DENSITY_WARNING: float = 5.0
+    FIRE_SMOKE_DENSITY_ALARM: float = 15.0
+    FIRE_PROBABILITY_THRESHOLD: float = 0.7
+
+    ROBOT_SPEED: float = 1.0
+    ROBOT_BATTERY_FULL: float = 100.0
+    ROBOT_BATTERY_LOW: float = 20.0
+    ROBOT_AVOID_HIGH_TEMP: float = 40.0
+    ROBOT_AVOID_HIGH_HUMIDITY: float = 80.0
+    ROBOT_AVOID_GAS_METHANE: float = 0.5
+    ROBOT_AVOID_GAS_H2S: float = 5.0
+
+    ASSET_LIFE_PREDICTION_MODEL: str = "rule_based"
+    MAINTENANCE_MONTHLY_PRIORITY_WEIGHT: float = 1.5
+    MAINTENANCE_RISK_WEIGHT: float = 2.0
+
 
 settings = Settings()

@@ -32,6 +32,8 @@ class PLCConfig:
     api_url: str = "http://fastapi:8000"
     num_fans: int = 30
     num_pumps: int = 50
+    num_fire_doors: int = 16
+    num_fire_extinguishers: int = 50
     status_interval: int = 10
     telemetry_interval: int = 60
     enable_mqtt: bool = True
@@ -50,6 +52,7 @@ class PLCConfig:
     fault_probability: float = 0.001
     auto_recovery: bool = True
     auto_recovery_time: int = 300
+    extinguisher_discharge_duration: int = 30
 
     @classmethod
     def from_env(cls) -> 'PLCConfig':
@@ -78,6 +81,12 @@ class PLCConfig:
         config.fault_probability = float(os.getenv("FAULT_PROBABILITY", str(config.fault_probability)))
         config.auto_recovery = os.getenv("AUTO_RECOVERY", "true").lower() == "true"
         config.auto_recovery_time = int(os.getenv("AUTO_RECOVERY_TIME", str(config.auto_recovery_time)))
+        config.num_fire_doors = int(os.getenv("PLC_NUM_FIRE_DOORS", str(config.num_fire_doors)))
+        config.num_fire_extinguishers = int(os.getenv("PLC_NUM_FIRE_EXTINGUISHERS", str(config.num_fire_extinguishers)))
+        config.extinguisher_discharge_duration = int(os.getenv(
+            "EXTINGUISHER_DISCHARGE_DURATION", 
+            str(config.extinguisher_discharge_duration)
+        ))
         
         return config
     
@@ -92,6 +101,8 @@ class PLCConfig:
         logger.info(f"API URL: {self.api_url}")
         logger.info(f"Fans: {self.num_fans}")
         logger.info(f"Pumps: {self.num_pumps}")
+        logger.info(f"Fire doors: {self.num_fire_doors}")
+        logger.info(f"Fire extinguishers: {self.num_fire_extinguishers}")
         logger.info(f"Status interval: {self.status_interval}s")
         logger.info(f"Telemetry interval: {self.telemetry_interval}s")
         logger.info(f"MQTT enabled: {self.enable_mqtt}")
@@ -125,6 +136,14 @@ class PLCDevice:
         
         self.auto_mode = True
         self.last_status_update: Optional[datetime] = None
+        
+        self.door_open = True
+        self.zone_id = None
+        self.discharging = False
+        self.discharge_start_time: Optional[datetime] = None
+        self.remaining_agent = 100.0
+        self.discharge_count = 0
+        self.pressure = 1.2
     
     def update_telemetry(self):
         if self.status == "fault" and self.config.auto_recovery and self.fault_time:
@@ -135,50 +154,92 @@ class PLCDevice:
                 self.fault_time = None
                 logger.info(f"[{self.device_id}] Auto recovery after {recovery_time:.0f}s")
         
-        if self.running and self.status != "fault":
-            temp_drift = random.uniform(-0.5, 1.0) if self.running else random.uniform(-1.0, 0.1)
-            self.temperature = max(
-                self.config.temperature_normal_min,
-                min(self.config.temperature_fault_threshold + 10, self.temperature + temp_drift)
+        if self.device_type in ["fan", "pump"]:
+            if self.running and self.status != "fault":
+                temp_drift = random.uniform(-0.5, 1.0) if self.running else random.uniform(-1.0, 0.1)
+                self.temperature = max(
+                    self.config.temperature_normal_min,
+                    min(self.config.temperature_fault_threshold + 10, self.temperature + temp_drift)
+                )
+                self.current = random.uniform(
+                    self.config.current_running_min,
+                    self.config.current_running_max
+                ) if self.running else 0.0
+                self.vibration = random.uniform(0.5, 2.0) if self.running else 0.1
+                self.runtime_hours += 1 / 3600
+                self.energy_consumption += (self.current * self.config.voltage_nominal / 1000) * (1 / 3600)
+                self.power_factor = random.uniform(0.8, 0.95) if self.running else 0.0
+            else:
+                temp_drift = random.uniform(-1.0, 0.1)
+                self.temperature = max(
+                    self.config.temperature_normal_min,
+                    min(self.config.temperature_normal_max, self.temperature + temp_drift)
+                )
+                self.current = 0.0
+                self.vibration = 0.1
+                self.power_factor = 0.0
+            
+            self.voltage = self.config.voltage_nominal + random.uniform(
+                -self.config.voltage_tolerance,
+                self.config.voltage_tolerance
             )
-            self.current = random.uniform(
-                self.config.current_running_min,
-                self.config.current_running_max
-            ) if self.running else 0.0
-            self.vibration = random.uniform(0.5, 2.0) if self.running else 0.1
-            self.runtime_hours += 1 / 3600
-            self.energy_consumption += (self.current * self.config.voltage_nominal / 1000) * (1 / 3600)
-            self.power_factor = random.uniform(0.8, 0.95) if self.running else 0.0
-        else:
-            temp_drift = random.uniform(-1.0, 0.1)
-            self.temperature = max(
-                self.config.temperature_normal_min,
-                min(self.config.temperature_normal_max, self.temperature + temp_drift)
-            )
-            self.current = 0.0
-            self.vibration = 0.1
-            self.power_factor = 0.0
-        
-        self.voltage = self.config.voltage_nominal + random.uniform(
-            -self.config.voltage_tolerance,
-            self.config.voltage_tolerance
-        )
-        
-        if self.running and self.status != "fault" and random.random() < self.config.fault_probability:
-            self.fault_count += 1
-            if self.fault_count > 5:
+            
+            if self.running and self.status != "fault" and random.random() < self.config.fault_probability:
+                self.fault_count += 1
+                if self.fault_count > 5:
+                    self.status = "fault"
+                    self.fault_time = datetime.utcnow()
+                    self.running = False
+                    self.speed = 0
+                    logger.warning(f"[{self.device_id}] Fault detected! Fault count: {self.fault_count}")
+            
+            if self.temperature >= self.config.temperature_fault_threshold and self.status != "fault":
                 self.status = "fault"
                 self.fault_time = datetime.utcnow()
                 self.running = False
                 self.speed = 0
-                logger.warning(f"[{self.device_id}] Fault detected! Fault count: {self.fault_count}")
+                logger.warning(f"[{self.device_id}] Over temperature fault: {self.temperature:.1f}°C")
         
-        if self.temperature >= self.config.temperature_fault_threshold and self.status != "fault":
-            self.status = "fault"
-            self.fault_time = datetime.utcnow()
-            self.running = False
-            self.speed = 0
-            logger.warning(f"[{self.device_id}] Over temperature fault: {self.temperature:.1f}°C")
+        elif self.device_type == "fire_door":
+            self.temperature = max(
+                self.config.temperature_normal_min,
+                min(self.config.temperature_normal_max, self.temperature + random.uniform(-0.2, 0.2))
+            )
+            self.voltage = self.config.voltage_nominal + random.uniform(-2, 2)
+            self.current = random.uniform(0.1, 0.5) if self.status == "online" else 0.0
+            
+            if random.random() < self.config.fault_probability * 0.5:
+                self.fault_count += 1
+                if self.fault_count > 3:
+                    self.status = "fault"
+                    self.fault_time = datetime.utcnow()
+                    logger.warning(f"[{self.device_id}] Fire door fault detected!")
+        
+        elif self.device_type == "fire_extinguisher":
+            self.temperature = max(
+                self.config.temperature_normal_min,
+                min(self.config.temperature_normal_max, self.temperature + random.uniform(-0.1, 0.1))
+            )
+            self.pressure = max(0.8, min(1.5, self.pressure + random.uniform(-0.01, 0.01)))
+            
+            if self.discharging and self.discharge_start_time:
+                elapsed = (datetime.utcnow() - self.discharge_start_time).total_seconds()
+                if elapsed >= self.config.extinguisher_discharge_duration:
+                    self.discharging = False
+                    self.remaining_agent = max(0, self.remaining_agent - random.uniform(20, 40))
+                    logger.info(f"[{self.device_id}] Discharge completed")
+            
+            if self.pressure < 1.0 and self.status != "fault":
+                self.status = "fault"
+                self.fault_time = datetime.utcnow()
+                logger.warning(f"[{self.device_id}] Low pressure fault: {self.pressure:.2f}MPa")
+            
+            if random.random() < self.config.fault_probability * 0.3:
+                self.fault_count += 1
+                if self.fault_count > 3:
+                    self.status = "fault"
+                    self.fault_time = datetime.utcnow()
+                    logger.warning(f"[{self.device_id}] Extinguisher fault detected!")
         
         self.last_status_update = datetime.utcnow()
     
@@ -262,6 +323,78 @@ class PLCDevice:
                 result["success"] = False
                 result["message"] = f"Unknown command for pump: {command}"
         
+        elif self.device_type == "fire_door":
+            if command == "close":
+                self.door_open = False
+                self.running = True
+                self.start_count += 1
+                result["message"] = "Fire door closed"
+            
+            elif command == "open":
+                self.door_open = True
+                self.running = False
+                result["message"] = "Fire door opened"
+            
+            elif command == "reset_fault":
+                self.fault_count = 0
+                self.status = "online"
+                self.fault_time = None
+                result["message"] = "Fault reset"
+            
+            elif command == "set_mode":
+                self.auto_mode = parameters.get("auto", True)
+                result["message"] = f"Mode set to {'auto' if self.auto_mode else 'manual'}"
+            
+            else:
+                result["success"] = False
+                result["message"] = f"Unknown command for fire_door: {command}"
+        
+        elif self.device_type == "fire_extinguisher":
+            if command == "discharge":
+                if self.remaining_agent <= 0:
+                    result["success"] = False
+                    result["message"] = "No agent remaining"
+                elif self.discharging:
+                    result["success"] = False
+                    result["message"] = "Already discharging"
+                else:
+                    self.discharging = True
+                    self.discharge_start_time = datetime.utcnow()
+                    self.discharge_count += 1
+                    self.running = True
+                    self.start_count += 1
+                    result["message"] = "Extinguisher discharge started"
+            
+            elif command == "stop_discharge":
+                if self.discharging:
+                    self.discharging = False
+                    self.running = False
+                    self.remaining_agent = max(0, self.remaining_agent - random.uniform(5, 15))
+                    result["message"] = "Extinguisher discharge stopped"
+                else:
+                    result["success"] = False
+                    result["message"] = "Not discharging"
+            
+            elif command == "reset_fault":
+                self.fault_count = 0
+                self.status = "online"
+                self.fault_time = None
+                self.pressure = 1.2
+                result["message"] = "Fault reset"
+            
+            elif command == "recharge":
+                self.remaining_agent = 100.0
+                self.pressure = 1.2
+                result["message"] = "Extinguisher recharged"
+            
+            elif command == "set_mode":
+                self.auto_mode = parameters.get("auto", True)
+                result["message"] = f"Mode set to {'auto' if self.auto_mode else 'manual'}"
+            
+            else:
+                result["success"] = False
+                result["message"] = f"Unknown command for fire_extinguisher: {command}"
+        
         else:
             result["success"] = False
             result["message"] = f"Unknown device type: {self.device_type}"
@@ -271,7 +404,7 @@ class PLCDevice:
         return result
     
     def get_status(self) -> Dict[str, Any]:
-        return {
+        base_status = {
             "device_id": self.device_id,
             "device_type": self.device_type,
             "running": self.running,
@@ -295,6 +428,19 @@ class PLCDevice:
             "last_status_update": self.last_status_update.isoformat() if self.last_status_update else None,
             "timestamp": datetime.utcnow().isoformat()
         }
+        
+        if self.device_type == "fire_door":
+            base_status["door_open"] = self.door_open
+            base_status["zone_id"] = self.zone_id
+        
+        if self.device_type == "fire_extinguisher":
+            base_status["discharging"] = self.discharging
+            base_status["remaining_agent"] = round(self.remaining_agent, 1)
+            base_status["discharge_count"] = self.discharge_count
+            base_status["pressure"] = round(self.pressure, 2)
+            base_status["zone_id"] = self.zone_id
+        
+        return base_status
 
 
 class MQTTPLCSimulator:
@@ -315,20 +461,24 @@ class MQTTPLCSimulator:
         try:
             import httpx
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(f"{self.config.api_url}/api/devices/?limit=500")
+                response = await client.get(f"{self.config.api_url}/api/devices/?limit=1000")
                 if response.status_code == 200:
                     data = response.json()
                     devices = data.get("devices", [])
                     
                     for device in devices:
                         device_type = device["type"]
-                        if device_type in ["fan", "pump"]:
+                        if device_type in ["fan", "pump", "fire_door", "fire_extinguisher"]:
                             plc_device = PLCDevice(device["device_id"], device_type, self.config)
+                            if device.get("zone_id"):
+                                plc_device.zone_id = device["zone_id"]
                             self.devices[device["device_id"]] = plc_device
                     
                     fans = len([d for d in self.devices.values() if d.device_type == "fan"])
                     pumps = len([d for d in self.devices.values() if d.device_type == "pump"])
-                    logger.info(f"Loaded {fans} fans and {pumps} pumps from API")
+                    doors = len([d for d in self.devices.values() if d.device_type == "fire_door"])
+                    exts = len([d for d in self.devices.values() if d.device_type == "fire_extinguisher"])
+                    logger.info(f"Loaded {fans} fans, {pumps} pumps, {doors} fire doors, {exts} extinguishers from API")
                     return
         except Exception as e:
             logger.error(f"Failed to load devices from API: {e}")
@@ -346,9 +496,23 @@ class MQTTPLCSimulator:
             device_id = f"pump_{str(i).zfill(4)}"
             self.devices[device_id] = PLCDevice(device_id, "pump", self.config)
         
+        for i in range(1, self.config.num_fire_doors + 1):
+            device_id = f"fire_door_{str(i).zfill(4)}"
+            door = PLCDevice(device_id, "fire_door", self.config)
+            door.zone_id = f"zone_{((i - 1) % 16) + 1}"
+            self.devices[device_id] = door
+        
+        for i in range(1, self.config.num_fire_extinguishers + 1):
+            device_id = f"fire_ext_{str(i).zfill(4)}"
+            ext = PLCDevice(device_id, "fire_extinguisher", self.config)
+            ext.zone_id = f"zone_{((i - 1) % 16) + 1}"
+            self.devices[device_id] = ext
+        
         fans = len([d for d in self.devices.values() if d.device_type == "fan"])
         pumps = len([d for d in self.devices.values() if d.device_type == "pump"])
-        logger.info(f"Generated {fans} fans and {pumps} pumps")
+        doors = len([d for d in self.devices.values() if d.device_type == "fire_door"])
+        exts = len([d for d in self.devices.values() if d.device_type == "fire_extinguisher"])
+        logger.info(f"Generated {fans} fans, {pumps} pumps, {doors} fire doors, {exts} extinguishers")
     
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
@@ -358,7 +522,9 @@ class MQTTPLCSimulator:
             control_topics = [
                 (self.config.control_topic, 1),
                 (f"{self.config.control_topic}/fan/+", 1),
-                (f"{self.config.control_topic}/pump/+", 1)
+                (f"{self.config.control_topic}/pump/+", 1),
+                (f"{self.config.control_topic}/fire_door/+", 1),
+                (f"{self.config.control_topic}/fire_extinguisher/+", 1)
             ]
             
             for topic, qos in control_topics:
@@ -502,6 +668,8 @@ class MQTTPLCSimulator:
             "num_devices": len(self.devices),
             "num_fans": len([d for d in self.devices.values() if d.device_type == "fan"]),
             "num_pumps": len([d for d in self.devices.values() if d.device_type == "pump"]),
+            "num_fire_doors": len([d for d in self.devices.values() if d.device_type == "fire_door"]),
+            "num_fire_extinguishers": len([d for d in self.devices.values() if d.device_type == "fire_extinguisher"]),
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -711,6 +879,8 @@ class MQTTPLCSimulator:
     def get_statistics(self) -> Dict[str, Any]:
         fans = [d for d in self.devices.values() if d.device_type == "fan"]
         pumps = [d for d in self.devices.values() if d.device_type == "pump"]
+        doors = [d for d in self.devices.values() if d.device_type == "fire_door"]
+        exts = [d for d in self.devices.values() if d.device_type == "fire_extinguisher"]
         
         return {
             "total_devices": len(self.devices),
@@ -723,6 +893,16 @@ class MQTTPLCSimulator:
                 "total": len(pumps),
                 "running": sum(1 for d in pumps if d.running),
                 "fault": sum(1 for d in pumps if d.status == "fault")
+            },
+            "fire_doors": {
+                "total": len(doors),
+                "closed": sum(1 for d in doors if not d.door_open),
+                "fault": sum(1 for d in doors if d.status == "fault")
+            },
+            "fire_extinguishers": {
+                "total": len(exts),
+                "discharging": sum(1 for d in exts if d.discharging),
+                "fault": sum(1 for d in exts if d.status == "fault")
             },
             "commands_processed": self.command_count,
             "status_updates": self.status_publish_count,
@@ -747,6 +927,10 @@ async def main():
                         help="Number of fans (overrides PLC_NUM_FANS env var)")
     parser.add_argument("--num-pumps", type=int, default=None,
                         help="Number of pumps (overrides PLC_NUM_PUMPS env var)")
+    parser.add_argument("--num-fire-doors", type=int, default=None,
+                        help="Number of fire doors (overrides PLC_NUM_FIRE_DOORS env var)")
+    parser.add_argument("--num-fire-extinguishers", type=int, default=None,
+                        help="Number of fire extinguishers (overrides PLC_NUM_FIRE_EXTINGUISHERS env var)")
     parser.add_argument("--print-config", action="store_true",
                         help="Print configuration and exit")
     parser.add_argument("--print-stats", action="store_true",
@@ -768,6 +952,10 @@ async def main():
         config.num_fans = args.num_fans
     if args.num_pumps:
         config.num_pumps = args.num_pumps
+    if args.num_fire_doors:
+        config.num_fire_doors = args.num_fire_doors
+    if args.num_fire_extinguishers:
+        config.num_fire_extinguishers = args.num_fire_extinguishers
     
     if args.print_config:
         config.print_config()

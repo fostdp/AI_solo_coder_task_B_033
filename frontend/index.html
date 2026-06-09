@@ -20,11 +20,23 @@
                 </div>
                 <div class="stat-item">
                     <span class="stat-label">舱室数量</span>
-                    <span class="stat-value">3</span>
+                    <span class="stat-value">4</span>
                 </div>
                 <div class="stat-item">
                     <span class="stat-label">设备总数</span>
-                    <span class="stat-value" id="total-devices">380</span>
+                    <span class="stat-value" id="total-devices">611</span>
+                </div>
+                <div class="stat-item alert-item" id="structure-alert-stat">
+                    <span class="stat-label">结构告警</span>
+                    <span class="stat-value" id="structure-alert-count">0</span>
+                </div>
+                <div class="stat-item alert-item" id="fire-alert-stat">
+                    <span class="stat-label">火灾告警</span>
+                    <span class="stat-value" id="fire-alert-count">0</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">运行机器人</span>
+                    <span class="stat-value" id="active-robots">0 / 5</span>
                 </div>
             </div>
         </div>
@@ -58,6 +70,14 @@
                     <div class="fault-stat fault-security">
                         <span class="fault-count" id="fault-security">0</span>
                         <span class="fault-label">安防告警</span>
+                    </div>
+                    <div class="fault-stat fault-structural">
+                        <span class="fault-count" id="fault-structural">0</span>
+                        <span class="fault-label">结构风险告警</span>
+                    </div>
+                    <div class="fault-stat fault-fire">
+                        <span class="fault-count" id="fault-fire">0</span>
+                        <span class="fault-label">火灾预警</span>
                     </div>
                 </div>
                 <canvas id="fault-chart" width="280" height="150"></canvas>
@@ -116,6 +136,38 @@
                         </div>
                     </div>
                     <div class="device-stat-row">
+                        <span class="device-type">光纤传感器</span>
+                        <div class="device-counts">
+                            <span class="count-normal" id="fiber-normal">100</span>
+                            <span class="count-warning" id="fiber-warning">0</span>
+                            <span class="count-fault" id="fiber-fault">0</span>
+                        </div>
+                    </div>
+                    <div class="device-stat-row">
+                        <span class="device-type">烟雾传感器</span>
+                        <div class="device-counts">
+                            <span class="count-normal" id="smoke-normal">60</span>
+                            <span class="count-warning" id="smoke-warning">0</span>
+                            <span class="count-fault" id="smoke-fault">0</span>
+                        </div>
+                    </div>
+                    <div class="device-stat-row">
+                        <span class="device-type">巡检机器人</span>
+                        <div class="device-counts">
+                            <span class="count-normal" id="robot-normal">5</span>
+                            <span class="count-warning" id="robot-warning">0</span>
+                            <span class="count-fault" id="robot-fault">0</span>
+                        </div>
+                    </div>
+                    <div class="device-stat-row">
+                        <span class="device-type">防火门/灭火器</span>
+                        <div class="device-counts">
+                            <span class="count-normal" id="fire-equip-normal">66</span>
+                            <span class="count-warning" id="fire-equip-warning">0</span>
+                            <span class="count-fault" id="fire-equip-fault">0</span>
+                        </div>
+                    </div>
+                    <div class="device-stat-row">
                         <span class="device-type">井盖传感器</span>
                         <div class="device-counts">
                             <span class="count-normal" id="manhole-normal">100</span>
@@ -160,7 +212,38 @@
                         <span class="equip-label">运行水泵</span>
                         <span class="equip-value" id="running-pumps">0 / 50</span>
                     </div>
+                    <div class="equip-item">
+                        <span class="equip-icon">🔍</span>
+                        <span class="equip-label">巡检中机器人</span>
+                        <span class="equip-value" id="working-robots">0 / 5</span>
+                    </div>
+                    <div class="equip-item">
+                        <span class="equip-icon">🔒</span>
+                        <span class="equip-label">关闭防火分区</span>
+                        <span class="equip-value" id="closed-fire-zones">0 / 16</span>
+                    </div>
                 </div>
+            </div>
+
+            <div class="sidebar-section">
+                <h3>资产管理摘要</h3>
+                <div class="asset-summary">
+                    <div class="asset-item">
+                        <span class="asset-label">高风险设备</span>
+                        <span class="asset-value" id="high-risk-assets">0</span>
+                    </div>
+                    <div class="asset-item">
+                        <span class="asset-label">待维修设备</span>
+                        <span class="asset-value" id="pending-maintenance">0</span>
+                    </div>
+                    <div class="asset-item">
+                        <span class="asset-label">本月计划任务</span>
+                        <span class="asset-value" id="monthly-tasks">0</span>
+                    </div>
+                </div>
+                <button id="view-assets-btn" class="action-btn" style="width: 100%; margin-top: 10px;">
+                    📋 查看资产管理
+                </button>
             </div>
         </aside>
 
@@ -170,6 +253,9 @@
                     <label>图层筛选:</label>
                     <button class="layer-btn active" data-type="all">全部</button>
                     <button class="layer-btn" data-type="env_sensor">环境传感器</button>
+                    <button class="layer-btn" data-type="fiber_sensor">光纤传感器</button>
+                    <button class="layer-btn" data-type="smoke_sensor">烟雾传感器</button>
+                    <button class="layer-btn" data-type="inspection_robot">巡检机器人</button>
                     <button class="layer-btn" data-type="manhole">井盖</button>
                     <button class="layer-btn" data-type="pump">排水泵</button>
                     <button class="layer-btn" data-type="fan">风机</button>
@@ -180,6 +266,12 @@
                     <button class="chamber-btn" data-chamber="电力舱">电力舱</button>
                     <button class="chamber-btn" data-chamber="水信舱">水信舱</button>
                     <button class="chamber-btn" data-chamber="燃气舱">燃气舱</button>
+                </div>
+                <div class="toolbar-group">
+                    <label>叠加图层:</label>
+                    <button class="overlay-btn" data-overlay="structure_heatmap">🔥 结构热力图</button>
+                    <button class="overlay-btn" data-overlay="robot_tracks">📍 机器人轨迹</button>
+                    <button class="overlay-btn" data-overlay="fire_zones">🚨 火灾分区</button>
                 </div>
                 <div class="toolbar-group">
                     <button id="refresh-btn" class="action-btn">🔄 刷新数据</button>
@@ -233,10 +325,164 @@
         </div>
     </div>
 
+    <div id="assets-modal" class="modal">
+        <div class="modal-content assets-modal">
+            <div class="modal-header">
+                <h2>📋 资产管理与维修计划</h2>
+                <button class="close-btn" id="close-assets-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="assets-tabs">
+                    <button class="tab-btn active" data-assets-tab="assets">资产台账</button>
+                    <button class="tab-btn" data-assets-tab="predictions">寿命预测</button>
+                    <button class="tab-btn" data-assets-tab="maintenance">维修计划</button>
+                </div>
+                
+                <div class="tab-content" id="assets-tab">
+                    <div class="assets-filters">
+                        <input type="text" id="asset-search" placeholder="搜索设备名称/编号..." />
+                        <select id="asset-type-filter">
+                            <option value="all">全部类型</option>
+                            <option value="env_sensor">环境传感器</option>
+                            <option value="fiber_sensor">光纤传感器</option>
+                            <option value="smoke_sensor">烟雾传感器</option>
+                            <option value="inspection_robot">巡检机器人</option>
+                            <option value="fan">风机</option>
+                            <option value="pump">排水泵</option>
+                        </select>
+                        <select id="asset-risk-filter">
+                            <option value="all">全部风险等级</option>
+                            <option value="low">低风险</option>
+                            <option value="medium">中风险</option>
+                            <option value="high">高风险</option>
+                            <option value="critical">严重风险</option>
+                        </select>
+                    </div>
+                    <div class="assets-table-container">
+                        <table class="assets-table">
+                            <thead>
+                                <tr>
+                                    <th>设备编号</th>
+                                    <th>名称</th>
+                                    <th>类型</th>
+                                    <th>制造商</th>
+                                    <th>安装日期</th>
+                                    <th>设计寿命</th>
+                                    <th>剩余寿命</th>
+                                    <th>风险等级</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="assets-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <div class="tab-content" id="predictions-tab" style="display: none;">
+                    <div class="predictions-charts">
+                        <div class="chart-container">
+                            <h4>剩余寿命分布</h4>
+                            <canvas id="life-distribution-chart"></canvas>
+                        </div>
+                        <div class="chart-container">
+                            <h4>风险等级分布</h4>
+                            <canvas id="risk-distribution-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="tab-content" id="maintenance-tab" style="display: none;">
+                    <div class="maintenance-header">
+                        <h4>本月维修计划</h4>
+                        <button id="generate-plan-btn" class="action-btn">🔄 生成新计划</button>
+                    </div>
+                    <div class="maintenance-stats">
+                        <div class="maintenance-stat">
+                            <span class="stat-label">总任务数</span>
+                            <span class="stat-value" id="maint-total">0</span>
+                        </div>
+                        <div class="maintenance-stat">
+                            <span class="stat-label">高优先级</span>
+                            <span class="stat-value high" id="maint-high">0</span>
+                        </div>
+                        <div class="maintenance-stat">
+                            <span class="stat-label">已完成</span>
+                            <span class="stat-value" id="maint-completed">0</span>
+                        </div>
+                        <div class="maintenance-stat">
+                            <span class="stat-label">预估工时</span>
+                            <span class="stat-value" id="maint-hours">0 h</span>
+                        </div>
+                    </div>
+                    <div class="maintenance-tasks" id="maintenance-tasks"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="robot-modal" class="modal">
+        <div class="modal-content robot-modal">
+            <div class="modal-header">
+                <h2 id="robot-modal-title">🤖 巡检机器人详情</h2>
+                <button class="close-btn" id="close-robot-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="robot-status">
+                    <div class="robot-info-grid">
+                        <div class="info-card">
+                            <span class="info-label">机器人编号</span>
+                            <span class="info-value" id="robot-id">--</span>
+                        </div>
+                        <div class="info-card">
+                            <span class="info-label">当前状态</span>
+                            <span class="info-value" id="robot-status">--</span>
+                        </div>
+                        <div class="info-card">
+                            <span class="info-label">电池电量</span>
+                            <div class="battery-bar">
+                                <div class="battery-fill" id="battery-fill"></div>
+                                <span class="battery-text" id="battery-text">--%</span>
+                            </div>
+                        </div>
+                        <div class="info-card">
+                            <span class="info-label">当前位置</span>
+                            <span class="info-value" id="robot-position">--</span>
+                        </div>
+                        <div class="info-card">
+                            <span class="info-label">当前任务</span>
+                            <span class="info-value" id="robot-mission">--</span>
+                        </div>
+                        <div class="info-card">
+                            <span class="info-label">巡检进度</span>
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="progress-fill"></div>
+                                <span class="progress-text" id="progress-text">--%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="robot-controls">
+                    <button class="robot-btn" id="btn-start-mission">▶️ 开始巡检</button>
+                    <button class="robot-btn" id="btn-pause-mission">⏸️ 暂停</button>
+                    <button class="robot-btn" id="btn-resume-mission" style="display: none;">▶️ 继续</button>
+                    <button class="robot-btn warning" id="btn-return-base">🏠 返回基地</button>
+                    <button class="robot-btn danger" id="btn-cancel-mission">❌ 取消任务</button>
+                </div>
+                
+                <div class="robot-path-map" id="robot-path-map"></div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="/static/js/corridor_map.js"></script>
     <script src="/static/js/device_detail.js"></script>
+    <script src="/static/js/structure_monitor.js"></script>
+    <script src="/static/js/robot_inspector.js"></script>
+    <script src="/static/js/fire_detector.js"></script>
+    <script src="/static/js/asset_manager.js"></script>
     <script src="/static/js/map.js"></script>
     <script src="/static/js/app.js"></script>
 </body>

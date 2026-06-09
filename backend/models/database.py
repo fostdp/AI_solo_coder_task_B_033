@@ -32,6 +32,18 @@ operation_logs_collection = db["operation_logs"]
 tunnel_route_collection = db["tunnel_route"]
 health_scores_collection = db["health_scores"]
 
+structure_alerts_collection = db["structure_alerts"]
+fiber_sensor_data_collection = db["fiber_sensor_data"]
+inspection_robots_collection = db["inspection_robots"]
+inspection_missions_collection = db["inspection_missions"]
+robot_positions_collection = db["robot_positions"]
+fire_alerts_collection = db["fire_alerts"]
+fire_zone_status_collection = db["fire_zone_status"]
+assets_collection = db["assets"]
+maintenance_records_collection = db["maintenance_records"]
+maintenance_plans_collection = db["maintenance_plans"]
+life_predictions_collection = db["life_predictions"]
+
 
 def serialize_document(doc):
     if doc is None:

@@ -15,9 +15,13 @@ from backend.modules import (
     lora_receiver,
     ventilation_controller,
     pump_controller_module,
-    alarm_manager
+    alarm_manager,
+    structure_monitor,
+    robot_inspector,
+    fire_detector,
+    asset_manager
 )
-from backend.routes import devices, sensor, alerts, control, stats
+from backend.routes import devices, sensor, alerts, control, stats, structure, robots, fire, assets
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,11 +40,20 @@ async def lifespan(app: FastAPI):
     await ventilation_controller.connect_redis()
     await pump_controller_module.connect_redis()
     await alarm_manager.connect_redis()
+    await structure_monitor.connect_redis()
+    await robot_inspector.connect_redis()
+    await fire_detector.connect_redis()
+    await asset_manager.connect_redis()
     
     redis_listener_task = asyncio.create_task(lora_receiver.start_redis_listener())
     ventilation_task = asyncio.create_task(ventilation_controller.start_control_loop())
     pump_task = asyncio.create_task(pump_controller_module.start_control_loop())
     alarm_task = asyncio.create_task(alarm_manager.start_listener())
+    structure_task = asyncio.create_task(structure_monitor.start_listener())
+    robot_task = asyncio.create_task(robot_inspector.start_control_loop())
+    fire_task = asyncio.create_task(fire_detector.start_listener())
+    life_prediction_task = asyncio.create_task(asset_manager.start_life_prediction_service())
+    maintenance_plan_task = asyncio.create_task(asset_manager.start_monthly_plan_generator())
     
     async def periodic_health_check():
         while True:
@@ -109,10 +122,19 @@ async def lifespan(app: FastAPI):
     ventilation_task.cancel()
     pump_task.cancel()
     alarm_task.cancel()
+    structure_task.cancel()
+    robot_task.cancel()
+    fire_task.cancel()
+    life_prediction_task.cancel()
+    maintenance_plan_task.cancel()
     await lora_receiver.disconnect_redis()
     await ventilation_controller.disconnect_redis()
     await pump_controller_module.disconnect_redis()
     await alarm_manager.disconnect_redis()
+    await structure_monitor.disconnect_redis()
+    await robot_inspector.disconnect_redis()
+    await fire_detector.disconnect_redis()
+    await asset_manager.disconnect_redis()
     await mqtt_service.disconnect()
     logger.info("System shutdown complete")
 
@@ -141,28 +163,47 @@ app.include_router(sensor.router)
 app.include_router(alerts.router)
 app.include_router(control.router)
 app.include_router(stats.router)
+app.include_router(structure.router)
+app.include_router(robots.router)
+app.include_router(fire.router)
+app.include_router(assets.router)
 
 
 @app.get("/")
 async def root():
     return {
         "name": "地下管廊综合监控与智能运维系统",
-        "version": "1.0.0",
-        "description": "城市地下综合管廊智能监控系统",
+        "version": "2.0.0",
+        "description": "城市地下综合管廊智能监控系统 - 包含结构健康监测、机器人巡检、火灾预警、资产管理四大新功能",
         "tunnel_length": f"{settings.TUNNEL_LENGTH}公里",
-        "chambers": ["电力舱", "水信舱", "燃气舱"],
+        "chambers": ["电力舱", "水信舱", "燃气舱", "综合"],
         "devices": {
             "environment_sensors": settings.NUM_ENV_SENSORS,
             "manhole_sensors": settings.NUM_MANHOLE_SENSORS,
             "pumps": settings.NUM_PUMPS,
-            "fans": settings.NUM_FANS
+            "fans": settings.NUM_FANS,
+            "fiber_sensors": settings.NUM_FIBER_SENSORS,
+            "smoke_sensors": settings.NUM_SMOKE_SENSORS,
+            "inspection_robots": settings.NUM_INSPECTION_ROBOTS,
+            "fire_doors": settings.NUM_FIRE_DOORS,
+            "fire_extinguishers": settings.NUM_FIRE_EXTINGUISHERS
         },
+        "new_features": [
+            "结构健康监测 - 分布式光纤应变/温度监测，布里渊散射原理",
+            "机器人巡检 - 智能路径规划，自动避开危险区域",
+            "火灾早期预警 - 贝叶斯网络推理，自动联动防火分区",
+            "资产管理 - 剩余寿命预测，月度维修计划自动生成"
+        ],
         "api_endpoints": {
             "devices": "/api/devices",
             "sensor_data": "/api/sensor/data",
             "alerts": "/api/alerts",
             "control": "/api/control",
             "statistics": "/api/stats",
+            "structure_monitoring": "/api/structure",
+            "robot_inspection": "/api/robots",
+            "fire_detection": "/api/fire",
+            "asset_management": "/api/assets",
             "websocket": "/api/alerts/ws"
         },
         "docs": "/docs"
