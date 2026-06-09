@@ -12,13 +12,18 @@ from backend.models.database import (
     fire_zone_status_collection,
     sensor_data_collection,
     devices_collection,
-    control_commands_collection
+    control_commands_collection,
+    fire_alert_confirmations_collection,
+    heat_source_analysis_collection
 )
 from backend.models.schemas import (
     FireSensorData,
     FireAlert,
     FireZoneStatus,
-    Location
+    Location,
+    HeatSourceFeature,
+    WeldingDetectionResult,
+    FireAlertConfirmation
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +108,8 @@ class FireDetector:
         self.smoke_history: Dict[str, List[Tuple[datetime, float]]] = {}
         self.running = False
         self.active_fire_zones: Dict[str, Dict[str, Any]] = {}
+        self.pending_confirmations: Dict[str, FireAlertConfirmation] = {}
+        self.heat_source_cache: Dict[str, List[Tuple[datetime, float, float]]] = {}
 
     async def connect_redis(self):
         self.redis_client = redis.Redis(
@@ -198,16 +205,29 @@ class FireDetector:
             self.smoke_history[data.device_id] = []
         self.smoke_history[data.device_id].append((now, data.smoke_density))
 
+        if data.device_id not in self.heat_source_cache:
+            self.heat_source_cache[data.device_id] = []
+        self.heat_source_cache[data.device_id].append((now, data.temperature, data.smoke_density))
+
         cutoff = now - timedelta(minutes=5)
         self.smoke_history[data.device_id] = [
             (t, v) for t, v in self.smoke_history[data.device_id]
             if t >= cutoff
         ]
 
+        heat_cutoff = now - timedelta(minutes=max(settings.FIRE_HEAT_SOURCE_DURATION_MIN, 10))
+        self.heat_source_cache[data.device_id] = [
+            (t, temp, smoke) for t, temp, smoke in self.heat_source_cache[data.device_id]
+            if t >= heat_cutoff
+        ]
+
         temp_rate = data.temperature_rate if data.temperature_rate is not None \
             else self._calculate_temp_rate(data.device_id, data.temperature)
 
         correlation = self._calculate_temp_smoke_correlation(data.device_id)
+
+        heat_source_features = await self._extract_heat_source_features(data.device_id)
+        welding_result = await self._detect_welding_operation(data.device_id, heat_source_features)
 
         fire_probability = self.bayesian_detector.calculate_fire_probability(
             temperature=data.temperature,
@@ -220,6 +240,11 @@ class FireDetector:
             data.device_id, data.temperature, chamber
         )
 
+        adjusted_fire_probability = fire_probability
+        if welding_result.is_welding:
+            adjusted_fire_probability *= (1.0 - welding_result.confidence * 0.8)
+            logger.info(f"Welding operation detected at {data.device_id}, adjusted fire probability from {fire_probability:.3f} to {adjusted_fire_probability:.3f}")
+
         result = {
             "status": "success",
             "device_id": data.device_id,
@@ -230,23 +255,50 @@ class FireDetector:
             "smoke_density": data.smoke_density,
             "correlation": correlation,
             "fire_probability": fire_probability,
-            "is_equipment_overheat": is_overheat
+            "adjusted_fire_probability": adjusted_fire_probability,
+            "is_equipment_overheat": is_overheat,
+            "is_welding": welding_result.is_welding,
+            "welding_confidence": welding_result.confidence,
+            "heat_source_features": heat_source_features.dict()
         }
 
-        if fire_probability >= settings.FIRE_PROBABILITY_THRESHOLD and not is_overheat:
-            risk_level = "critical" if fire_probability >= 0.9 else "warning"
-            alert_result = await self._create_fire_alert(
-                chamber, distance_km, fire_probability,
-                data.temperature, data.smoke_density, risk_level
-            )
-            result["alert"] = alert_result
-            result["risk_level"] = risk_level
+        if adjusted_fire_probability >= settings.FIRE_PROBABILITY_THRESHOLD and not is_overheat and not welding_result.is_welding:
+            risk_level = "critical" if adjusted_fire_probability >= 0.9 else "warning"
+            
+            requires_confirmation = risk_level == "critical"
+            
+            if requires_confirmation:
+                confirmation = await self._create_alert_confirmation(
+                    data.device_id, chamber, distance_km, adjusted_fire_probability,
+                    data.temperature, data.smoke_density, risk_level
+                )
+                result["confirmation"] = confirmation.dict()
+                result["risk_level"] = risk_level
+                result["requires_confirmation"] = True
+                
+                if confirmation.auto_upgraded:
+                    alert_result = await self._create_fire_alert(
+                        chamber, distance_km, adjusted_fire_probability,
+                        data.temperature, data.smoke_density, risk_level
+                    )
+                    result["alert"] = alert_result
+                    await self._activate_fire_response(chamber, distance_km, alert_result["alert_id"])
+            else:
+                alert_result = await self._create_fire_alert(
+                    chamber, distance_km, adjusted_fire_probability,
+                    data.temperature, data.smoke_density, risk_level
+                )
+                result["alert"] = alert_result
+                result["risk_level"] = risk_level
+                result["requires_confirmation"] = False
 
-            await self._activate_fire_response(chamber, distance_km, alert_result["alert_id"])
-        elif fire_probability >= 0.5:
+                await self._activate_fire_response(chamber, distance_km, alert_result["alert_id"])
+        elif adjusted_fire_probability >= 0.5:
             result["risk_level"] = "attention"
         else:
             result["risk_level"] = "normal"
+        
+        await self._check_confirmation_timeouts()
 
         if self.redis_client:
             await self.redis_client.publish(
@@ -467,6 +519,372 @@ class FireDetector:
             }}
         )
         return result.modified_count > 0
+
+    async def _extract_heat_source_features(self, device_id: str) -> HeatSourceFeature:
+        history = self.heat_source_cache.get(device_id, [])
+        
+        if len(history) < 3:
+            return HeatSourceFeature(
+                device_id=device_id,
+                temperature_max=0.0,
+                temperature_min=0.0,
+                temperature_mean=0.0,
+                temperature_std=0.0,
+                temp_distribution_score=0.0,
+                duration_minutes=0.0,
+                smoke_mean=0.0,
+                temp_smoke_correlation=0.0,
+                fluctuation_frequency=0.0,
+                is_periodic=False
+            )
+        
+        temps = [h[1] for h in history]
+        smokes = [h[2] for h in history]
+        times = [h[0] for h in history]
+        
+        temp_max = max(temps)
+        temp_min = min(temps)
+        temp_mean = sum(temps) / len(temps)
+        temp_std = math.sqrt(sum((t - temp_mean) ** 2 for t in temps) / len(temps))
+        
+        temp_range = temp_max - temp_min
+        temp_distribution_score = min(1.0, temp_range / settings.FIRE_TEMP_DISTRIBUTION_THRESHOLD)
+        
+        duration_minutes = abs((times[-1] - times[0]).total_seconds()) / 60.0
+        
+        smoke_mean = sum(smokes) / len(smokes)
+        
+        if len(temps) >= 3 and len(smokes) >= 3:
+            avg_temp = temp_mean
+            avg_smoke = smoke_mean
+            covariance = sum((t - avg_temp) * (s - avg_smoke) for t, s in zip(temps, smokes))
+            var_temp = sum((t - avg_temp) ** 2 for t in temps)
+            var_smoke = sum((s - avg_smoke) ** 2 for s in smokes)
+            if var_temp > 0 and var_smoke > 0:
+                correlation = covariance / math.sqrt(var_temp * var_smoke)
+            else:
+                correlation = 0.0
+        else:
+            correlation = 0.0
+        
+        fluctuation_count = 0
+        diffs = []
+        for i in range(1, len(temps)):
+            diffs.append(temps[i] - temps[i-1])
+        
+        for i in range(1, len(diffs)):
+            if diffs[i] * diffs[i-1] < 0:
+                window_size = min(3, i, len(diffs) - i - 1)
+                if window_size >= 1:
+                    left_max = max(temps[i-window_size:i+1])
+                    left_min = min(temps[i-window_size:i+1])
+                    right_max = max(temps[i:i+window_size+2])
+                    right_min = min(temps[i:i+window_size+2])
+                    peak_to_peak = max(left_max, right_max) - min(left_min, right_min)
+                else:
+                    peak_to_peak = abs(temps[i+1] - temps[i-1])
+                
+                if peak_to_peak > settings.FIRE_WELDING_TEMP_FLUCTUATION / 4:
+                    fluctuation_count += 1
+        
+        temp_range = temp_max - temp_min
+        has_significant_range = temp_range > settings.FIRE_WELDING_TEMP_FLUCTUATION
+        
+        has_significant_std = temp_std > settings.FIRE_WELDING_TEMP_FLUCTUATION / 2
+        
+        if duration_minutes > 0:
+            fluctuation_frequency = fluctuation_count / duration_minutes
+        else:
+            fluctuation_frequency = 0.0
+        
+        is_periodic = (fluctuation_frequency >= (0.5 / settings.FIRE_WELDING_CYCLE_SECONDS) or 
+                      (has_significant_range and has_significant_std and len(temps) >= 10))
+        
+        return HeatSourceFeature(
+            device_id=device_id,
+            temperature_max=temp_max,
+            temperature_min=temp_min,
+            temperature_mean=temp_mean,
+            temperature_std=temp_std,
+            temp_distribution_score=temp_distribution_score,
+            duration_minutes=duration_minutes,
+            smoke_mean=smoke_mean,
+            temp_smoke_correlation=max(-1.0, min(1.0, correlation)),
+            fluctuation_frequency=fluctuation_frequency,
+            is_periodic=is_periodic
+        )
+
+    async def _detect_welding_operation(
+        self,
+        device_id: str,
+        features: HeatSourceFeature
+    ) -> WeldingDetectionResult:
+        reasons = []
+        scores = []
+        
+        if features.temperature_std >= settings.FIRE_WELDING_TEMP_FLUCTUATION:
+            temp_fluctuation_score = min(1.0, features.temperature_std / (settings.FIRE_WELDING_TEMP_FLUCTUATION * 2))
+            scores.append(temp_fluctuation_score)
+            reasons.append(f"温度波动明显 (std={features.temperature_std:.1f}°C)")
+        else:
+            temp_fluctuation_score = 0.0
+            scores.append(0.0)
+        
+        if features.is_periodic:
+            periodicity_score = min(1.0, features.fluctuation_frequency / (120.0 / settings.FIRE_WELDING_CYCLE_SECONDS))
+            scores.append(periodicity_score)
+            reasons.append(f"温度周期性波动 (freq={features.fluctuation_frequency:.1f}/min)")
+        else:
+            periodicity_score = 0.0
+            scores.append(0.0)
+        
+        if features.smoke_mean < settings.FIRE_WELDING_SMOKE_THRESHOLD and features.temperature_mean > 40.0:
+            smoke_level_score = 1.0 - min(1.0, features.smoke_mean / settings.FIRE_WELDING_SMOKE_THRESHOLD)
+            scores.append(smoke_level_score)
+            reasons.append(f"高温低烟特征 (烟={features.smoke_mean:.1f}%)")
+        else:
+            smoke_level_score = 0.0
+            scores.append(0.0)
+        
+        if features.temp_smoke_correlation < 0.3 and features.temperature_mean > 40.0:
+            correlation_score = 1.0 - abs(features.temp_smoke_correlation)
+            scores.append(correlation_score)
+            reasons.append(f"温烟低相关性 (corr={features.temp_smoke_correlation:.2f})")
+        else:
+            correlation_score = 0.0
+            scores.append(0.0)
+        
+        if features.duration_minutes >= settings.FIRE_HEAT_SOURCE_DURATION_MIN and features.duration_minutes < 120:
+            duration_score = 0.8
+            scores.append(duration_score)
+            reasons.append(f"热源持续时间符合焊接特征 ({features.duration_minutes:.0f}分钟)")
+        else:
+            duration_score = 0.0
+            scores.append(0.0)
+        
+        if scores:
+            confidence = sum(scores) / len(scores)
+        else:
+            confidence = 0.0
+        
+        is_welding = confidence >= 0.6
+        
+        result = WeldingDetectionResult(
+            device_id=device_id,
+            is_welding=is_welding,
+            confidence=confidence,
+            temp_fluctuation_score=temp_fluctuation_score,
+            periodicity_score=periodicity_score,
+            smoke_level_score=smoke_level_score,
+            reasons=reasons
+        )
+        
+        if is_welding:
+            await heat_source_analysis_collection.insert_one({
+                "device_id": device_id,
+                "analysis_type": "welding_detection",
+                "is_welding": True,
+                "confidence": confidence,
+                "features": features.dict(),
+                "result": result.dict(),
+                "timestamp": datetime.utcnow()
+            })
+        
+        return result
+
+    async def _create_alert_confirmation(
+        self,
+        device_id: str,
+        chamber: str,
+        distance_km: float,
+        probability: float,
+        temperature: float,
+        smoke_density: float,
+        risk_level: str
+    ) -> FireAlertConfirmation:
+        confirmation_id = f"confirm_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{device_id}"
+        
+        confirmation = FireAlertConfirmation(
+            confirmation_id=confirmation_id,
+            alert_id="pending",
+            chamber=chamber,
+            distance_km=distance_km,
+            risk_level=risk_level,
+            requires_confirmation=True,
+            timeout_seconds=settings.FIRE_HUMAN_CONFIRM_TIMEOUT
+        )
+        
+        self.pending_confirmations[confirmation_id] = confirmation
+        
+        await fire_alert_confirmations_collection.insert_one(confirmation.model_dump(exclude={"id"}))
+        
+        if self.redis_client:
+            await self.redis_client.publish(
+                "tunnel:fire:confirmation_required",
+                json.dumps({
+                    "confirmation_id": confirmation_id,
+                    "chamber": chamber,
+                    "distance_km": distance_km,
+                    "probability": probability,
+                    "temperature": temperature,
+                    "smoke_density": smoke_density,
+                    "risk_level": risk_level,
+                    "timeout_seconds": settings.FIRE_HUMAN_CONFIRM_TIMEOUT,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            )
+        
+        logger.info(f"Created fire alert confirmation: {confirmation_id}, timeout: {settings.FIRE_HUMAN_CONFIRM_TIMEOUT}s")
+        
+        return confirmation
+
+    async def confirm_fire_alert(
+        self,
+        confirmation_id: str,
+        confirmed: bool,
+        confirmed_by: str,
+        confirmation_result: str
+    ) -> bool:
+        confirmation = self.pending_confirmations.get(confirmation_id)
+        if not confirmation:
+            confirmation_doc = await fire_alert_confirmations_collection.find_one({"confirmation_id": confirmation_id})
+            if not confirmation_doc:
+                return False
+            confirmation = FireAlertConfirmation(**confirmation_doc)
+        
+        confirmation.confirmed = True
+        confirmation.confirmed_by = confirmed_by
+        confirmation.confirmed_at = datetime.utcnow()
+        confirmation.confirmation_result = confirmation_result
+        
+        await fire_alert_confirmations_collection.update_one(
+            {"confirmation_id": confirmation_id},
+            {"$set": {
+                "confirmed": True,
+                "confirmed_by": confirmed_by,
+                "confirmed_at": confirmation.confirmed_at,
+                "confirmation_result": confirmation_result
+            }}
+        )
+        
+        if confirmation_id in self.pending_confirmations:
+            del self.pending_confirmations[confirmation_id]
+        
+        if self.redis_client:
+            await self.redis_client.publish(
+                "tunnel:fire:confirmation_result",
+                json.dumps({
+                    "confirmation_id": confirmation_id,
+                    "confirmed": confirmed,
+                    "confirmed_by": confirmed_by,
+                    "confirmation_result": confirmation_result,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            )
+        
+        if confirmed and confirmation_result == "fire_confirmed":
+            alert_result = await self._create_fire_alert(
+                confirmation.chamber,
+                confirmation.distance_km,
+                0.95,
+                0.0,
+                0.0,
+                confirmation.risk_level
+            )
+            await self._activate_fire_response(
+                confirmation.chamber,
+                confirmation.distance_km,
+                alert_result["alert_id"]
+            )
+        elif not confirmed or confirmation_result == "false_alarm":
+            zone_id = f"{confirmation.chamber}_{int(confirmation.distance_km / 1.0)}"
+            await self.deactivate_fire_zone(zone_id)
+        
+        logger.info(f"Fire alert confirmation {confirmation_id} processed: {confirmation_result} by {confirmed_by}")
+        return True
+
+    async def _check_confirmation_timeouts(self) -> None:
+        now = datetime.utcnow()
+        timeout_confirmations = []
+        
+        for conf_id, confirmation in list(self.pending_confirmations.items()):
+            elapsed = (now - confirmation.created_at).total_seconds()
+            if elapsed >= confirmation.timeout_seconds:
+                timeout_confirmations.append((conf_id, confirmation))
+        
+        for conf_id, confirmation in timeout_confirmations:
+            confirmation.confirmed = True
+            confirmation.auto_upgraded = True
+            confirmation.confirmed_at = now
+            confirmation.confirmation_result = "timeout_auto_upgrade"
+            
+            await fire_alert_confirmations_collection.update_one(
+                {"confirmation_id": conf_id},
+                {"$set": {
+                    "confirmed": True,
+                    "auto_upgraded": True,
+                    "confirmed_at": now,
+                    "confirmation_result": "timeout_auto_upgrade"
+                }}
+            )
+            
+            del self.pending_confirmations[conf_id]
+            
+            alert_result = await self._create_fire_alert(
+                confirmation.chamber,
+                confirmation.distance_km,
+                0.9,
+                0.0,
+                0.0,
+                confirmation.risk_level
+            )
+            await self._activate_fire_response(
+                confirmation.chamber,
+                confirmation.distance_km,
+                alert_result["alert_id"]
+            )
+            
+            if self.redis_client:
+                await self.redis_client.publish(
+                    "tunnel:fire:confirmation_timeout",
+                    json.dumps({
+                        "confirmation_id": conf_id,
+                        "chamber": confirmation.chamber,
+                        "distance_km": confirmation.distance_km,
+                        "risk_level": confirmation.risk_level,
+                        "alert_id": alert_result["alert_id"],
+                        "timestamp": now.isoformat()
+                    })
+                )
+            
+            logger.warning(f"Fire alert confirmation {conf_id} timed out after {confirmation.timeout_seconds}s, auto-upgraded to alert")
+
+    async def _auto_dismiss_alert(self, alert_id: str, reason: str) -> bool:
+        result = await fire_alerts_collection.update_one(
+            {"alert_id": alert_id},
+            {"$set": {
+                "acknowledged": True,
+                "dismissed": True,
+                "dismiss_reason": reason,
+                "dismissed_at": datetime.utcnow()
+            }}
+        )
+        
+        if result.modified_count > 0 and self.redis_client:
+            await self.redis_client.publish(
+                "tunnel:fire:alert_dismissed",
+                json.dumps({
+                    "alert_id": alert_id,
+                    "reason": reason,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            )
+        
+        return result.modified_count > 0
+
+    async def get_pending_confirmations(self) -> List[Dict[str, Any]]:
+        pending = list(self.pending_confirmations.values())
+        return [c.dict() for c in pending]
 
     async def start_listener(self):
         self.running = True

@@ -118,15 +118,15 @@ class LoraReceiver:
     
     def enrich_sensor_data(self, data: SensorData, device_info: Dict[str, Any]) -> SensorData:
         if device_info["type"] == "env_sensor":
-            data.type = "env_sensor"
+            data.data_type = "env_sensor"
         elif device_info["type"] == "pump":
-            data.type = "pump"
+            data.data_type = "pump"
         elif device_info["type"] == "manhole":
-            data.type = "manhole"
+            data.data_type = "manhole"
         elif device_info["type"] == "fan":
-            data.type = "fan"
+            data.data_type = "fan"
         else:
-            data.type = device_info["type"]
+            data.data_type = device_info["type"]
         
         if data.location is None and device_info.get("location"):
             from backend.models.schemas import Location
@@ -162,7 +162,7 @@ class LoraReceiver:
         return {
             "device_id": data.device_id,
             "status": "success",
-            "type": enriched_data.type
+            "type": enriched_data.data_type
         }
     
     async def process_batch_data(self, datas: List[SensorData]) -> Dict[str, Any]:
@@ -225,7 +225,7 @@ class LoraReceiver:
     async def _publish_to_redis(self, data: SensorData, device: Dict[str, Any]):
         message = {
             "device_id": data.device_id,
-            "type": data.type,
+            "type": data.data_type,
             "chamber": device.get("chamber", "综合"),
             "timestamp": data.timestamp.isoformat(),
             "data": {

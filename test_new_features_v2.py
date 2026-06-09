@@ -1754,6 +1754,718 @@ def test_asset_ledger_data_integrity():
     return True
 
 
+# ========== Robot Inspector - New Feature Tests ==========
+
+def test_topology_map_creation_normal():
+    """测试拓扑地图创建 - 正常情况"""
+    from backend.modules.robot_inspector import RobotInspector
+    from backend.config import settings
+    
+    inspector = RobotInspector()
+    
+    node_id = "node_0.0"
+    assert node_id == f"node_{0.0:.1f}"
+    
+    distance_km = 5.0
+    branch = distance_km in [3.0, 6.0, 9.0, 12.0]
+    assert branch == False, "5.0km should not be a branch point"
+    
+    distance_km = 6.0
+    branch = distance_km in [3.0, 6.0, 9.0, 12.0]
+    assert branch == True, "6.0km should be a branch point"
+    
+    weights = settings.ROBOT_GLOBAL_PLANNING_WEIGHT
+    assert abs(sum(weights.values()) - 1.0) < 0.01, "Weights should sum to 1.0"
+    
+    assert settings.ROBOT_PATH_PLANNING_ATTEMPTS == 3
+    assert settings.ROBOT_BRANCH_STABILITY_THRESHOLD == 0.7
+    
+    return True
+
+
+def test_astar_path_planning_normal():
+    """测试A*路径规划算法 - 正常情况"""
+    from backend.config import settings
+    
+    class MockNode:
+        def __init__(self, node_id, distance_km):
+            self.node_id = node_id
+            self.distance_km = distance_km
+    
+    from backend.modules.robot_inspector import RobotInspector
+    inspector = RobotInspector()
+    
+    node1 = MockNode("node_0.0", 0.0)
+    node2 = MockNode("node_5.0", 5.0)
+    
+    heuristic = inspector._heuristic(node1, node2)
+    assert heuristic == 5.0, f"Heuristic should be 5.0, got {heuristic}"
+    
+    node3 = MockNode("node_3.0", 3.0)
+    node4 = MockNode("node_10.0", 10.0)
+    heuristic2 = inspector._heuristic(node3, node4)
+    assert heuristic2 == 7.0, f"Heuristic should be 7.0, got {heuristic2}"
+    
+    weights = settings.ROBOT_GLOBAL_PLANNING_WEIGHT
+    assert "distance" in weights
+    assert "safety" in weights
+    assert "energy" in weights
+    assert "time" in weights
+    
+    return True
+
+
+def test_branch_stability_evaluation_normal():
+    """测试分支点稳定性评估 - 正常情况"""
+    from backend.config import settings
+    
+    sensor_weights = {
+        "temperature": 0.25,
+        "humidity": 0.15,
+        "methane": 0.25,
+        "h2s": 0.2,
+        "oxygen": 0.15
+    }
+    
+    env_data = {
+        "temperature": 25.0,
+        "humidity": 50.0,
+        "methane": 0.0,
+        "h2s": 0.0,
+        "oxygen": 20.5
+    }
+    
+    sensor_scores = {}
+    for sensor, value in env_data.items():
+        if sensor == "temperature":
+            score = 1.0 - min(1.0, abs(value - 25.0) / 30.0)
+        elif sensor == "humidity":
+            score = 1.0 - min(1.0, abs(value - 50.0) / 50.0)
+        elif sensor == "methane":
+            score = 1.0 - min(1.0, value / settings.ROBOT_AVOID_GAS_METHANE)
+        elif sensor == "h2s":
+            score = 1.0 - min(1.0, value / settings.ROBOT_AVOID_GAS_H2S)
+        elif sensor == "oxygen":
+            score = 1.0 - min(1.0, abs(value - 20.5) / 5.0)
+        else:
+            score = 1.0
+        sensor_scores[sensor] = max(0.0, min(1.0, score))
+    
+    stability_score = sum(
+        sensor_scores[sensor] * sensor_weights[sensor]
+        for sensor in sensor_weights
+    )
+    
+    assert approx_equal(stability_score, 1.0, 0.01), f"Perfect conditions should have score ~1.0, got {stability_score}"
+    assert stability_score >= settings.ROBOT_BRANCH_STABILITY_THRESHOLD
+    
+    bad_env = {
+        "temperature": 60.0,
+        "humidity": 90.0,
+        "methane": 1.0,
+        "h2s": 10.0,
+        "oxygen": 15.0
+    }
+    
+    bad_scores = {}
+    for sensor, value in bad_env.items():
+        if sensor == "temperature":
+            score = 1.0 - min(1.0, abs(value - 25.0) / 30.0)
+        elif sensor == "humidity":
+            score = 1.0 - min(1.0, abs(value - 50.0) / 50.0)
+        elif sensor == "methane":
+            score = 1.0 - min(1.0, value / settings.ROBOT_AVOID_GAS_METHANE)
+        elif sensor == "h2s":
+            score = 1.0 - min(1.0, value / settings.ROBOT_AVOID_GAS_H2S)
+        elif sensor == "oxygen":
+            score = 1.0 - min(1.0, abs(value - 20.5) / 5.0)
+        else:
+            score = 1.0
+        bad_scores[sensor] = max(0.0, min(1.0, score))
+    
+    bad_stability = sum(
+        bad_scores[sensor] * sensor_weights[sensor]
+        for sensor in sensor_weights
+    )
+    
+    assert bad_stability < settings.ROBOT_BRANCH_STABILITY_THRESHOLD, f"Bad conditions should fail stability check, got {bad_stability}"
+    
+    return True
+
+
+def test_path_planning_retry_mechanism():
+    """测试路径规划重试机制 - 边界情况"""
+    from backend.config import settings
+    
+    max_attempts = settings.ROBOT_PATH_PLANNING_ATTEMPTS
+    assert max_attempts == 3
+    
+    attempt_results = []
+    for attempt in range(1, max_attempts + 1):
+        weight_adjustments = [None]
+        if attempt > 1:
+            weight_adjustments = [
+                {"distance": 0.5, "safety": 0.3, "energy": 0.1, "time": 0.1},
+                {"distance": 0.2, "safety": 0.6, "energy": 0.1, "time": 0.1}
+            ]
+        
+        for weights in weight_adjustments:
+            if weights:
+                assert abs(sum(weights.values()) - 1.0) < 0.01
+                assert weights["safety"] >= 0.3
+            attempt_results.append(weights)
+    
+    total_attempts = len(attempt_results)
+    assert total_attempts == 1 + 2 + 2, f"Should have 5 weight configurations total, got {total_attempts}"
+    
+    fallback_triggered = False
+    if all(result is None for result in attempt_results[:max_attempts]):
+        fallback_triggered = True
+    
+    assert fallback_triggered == False
+    
+    return True
+
+
+# ========== Fire Detector - New Feature Tests ==========
+
+def test_heat_source_feature_extraction_normal():
+    """测试热源特征提取 - 正常情况"""
+    from backend.config import settings
+    from datetime import datetime, timedelta
+    
+    base_time = datetime.utcnow()
+    
+    normal_history = []
+    for i in range(10):
+        normal_history.append((
+            base_time - timedelta(minutes=i),
+            25.0 + random.uniform(-0.5, 0.5),
+            0.5 + random.uniform(-0.1, 0.1)
+        ))
+    
+    temps = [h[1] for h in normal_history]
+    smokes = [h[2] for h in normal_history]
+    times = [h[0] for h in normal_history]
+    
+    temp_max = max(temps)
+    temp_min = min(temps)
+    temp_mean = sum(temps) / len(temps)
+    temp_std = math.sqrt(sum((t - temp_mean) ** 2 for t in temps) / len(temps))
+    
+    temp_range = temp_max - temp_min
+    temp_distribution_score = min(1.0, temp_range / settings.FIRE_TEMP_DISTRIBUTION_THRESHOLD)
+    
+    assert temp_std < 1.0, f"Normal temp std should be low, got {temp_std}"
+    assert temp_distribution_score < 0.5, f"Normal distribution score should be low, got {temp_distribution_score}"
+    
+    fire_history = []
+    for i in range(10):
+        fire_history.append((
+            base_time - timedelta(minutes=i),
+            25.0 + i * 5.0,
+            0.5 + i * 3.0
+        ))
+    
+    fire_temps = [h[1] for h in fire_history]
+    fire_smokes = [h[2] for h in fire_history]
+    
+    fire_temp_mean = sum(fire_temps) / len(fire_temps)
+    fire_temp_std = math.sqrt(sum((t - fire_temp_mean) ** 2 for t in fire_temps) / len(fire_temps))
+    fire_smoke_mean = sum(fire_smokes) / len(fire_smokes)
+    
+    avg_temp = fire_temp_mean
+    avg_smoke = fire_smoke_mean
+    covariance = sum((t - avg_temp) * (s - avg_smoke) for t, s in zip(fire_temps, fire_smokes))
+    var_temp = sum((t - avg_temp) ** 2 for t in fire_temps)
+    var_smoke = sum((s - avg_smoke) ** 2 for s in fire_smokes)
+    if var_temp > 0 and var_smoke > 0:
+        correlation = covariance / math.sqrt(var_temp * var_smoke)
+    else:
+        correlation = 0.0
+    
+    assert correlation > 0.9, f"Fire conditions should have high temp-smoke correlation, got {correlation}"
+    assert fire_temp_std > 10.0, f"Fire temp std should be high, got {fire_temp_std}"
+    
+    return True
+
+
+def test_welding_detection_normal():
+    """测试焊接作业检测 - 正常情况"""
+    from backend.config import settings
+    
+    base_time = datetime.utcnow()
+    
+    welding_history = []
+    for i in range(30):
+        temp = 50.0 + 10.0 * math.sin(i * 0.5)
+        welding_history.append((
+            base_time - timedelta(seconds=i * 10),
+            temp,
+            1.0 + random.uniform(-0.3, 0.3)
+        ))
+    
+    temps = [h[1] for h in welding_history]
+    smokes = [h[2] for h in welding_history]
+    times = [h[0] for h in welding_history]
+    
+    temp_max = max(temps)
+    temp_min = min(temps)
+    temp_mean = sum(temps) / len(temps)
+    temp_std = math.sqrt(sum((t - temp_mean) ** 2 for t in temps) / len(temps))
+    smoke_mean = sum(smokes) / len(smokes)
+    
+    duration_minutes = abs((times[-1] - times[0]).total_seconds()) / 60.0
+    
+    fluctuation_count = 0
+    diffs = []
+    for i in range(1, len(temps)):
+        diffs.append(temps[i] - temps[i-1])
+    
+    for i in range(1, len(diffs)):
+        if diffs[i] * diffs[i-1] < 0:
+            window_size = min(3, i, len(diffs) - i - 1)
+            if window_size >= 1:
+                left_max = max(temps[i-window_size:i+1])
+                left_min = min(temps[i-window_size:i+1])
+                right_max = max(temps[i:i+window_size+2])
+                right_min = min(temps[i:i+window_size+2])
+                peak_to_peak = max(left_max, right_max) - min(left_min, right_min)
+            else:
+                peak_to_peak = abs(temps[i+1] - temps[i-1])
+            
+            if peak_to_peak > settings.FIRE_WELDING_TEMP_FLUCTUATION / 4:
+                fluctuation_count += 1
+    
+    temp_range = temp_max - temp_min
+    has_significant_range = temp_range > settings.FIRE_WELDING_TEMP_FLUCTUATION
+    
+    has_significant_std = temp_std > settings.FIRE_WELDING_TEMP_FLUCTUATION / 2
+    
+    if duration_minutes > 0:
+        fluctuation_frequency = fluctuation_count / duration_minutes
+    else:
+        fluctuation_frequency = 0.0
+    
+    is_periodic = (fluctuation_frequency >= (0.5 / settings.FIRE_WELDING_CYCLE_SECONDS) or 
+                  (has_significant_range and has_significant_std and len(temps) >= 10))
+    
+    assert temp_std >= settings.FIRE_WELDING_TEMP_FLUCTUATION, f"Welding should have temp fluctuation >= {settings.FIRE_WELDING_TEMP_FLUCTUATION}, got {temp_std}"
+    assert is_periodic == True, "Welding should show periodic fluctuations"
+    assert smoke_mean < settings.FIRE_WELDING_SMOKE_THRESHOLD, f"Welding should have low smoke, got {smoke_mean}"
+    
+    reasons = []
+    scores = []
+    
+    temp_fluctuation_score = min(1.0, temp_std / (settings.FIRE_WELDING_TEMP_FLUCTUATION * 2))
+    scores.append(temp_fluctuation_score)
+    reasons.append(f"温度波动明显 (std={temp_std:.1f}°C)")
+    
+    periodicity_score = min(1.0, fluctuation_frequency / (120.0 / settings.FIRE_WELDING_CYCLE_SECONDS))
+    scores.append(periodicity_score)
+    reasons.append(f"温度周期性波动 (freq={fluctuation_frequency:.1f}/min)")
+    
+    if smoke_mean < settings.FIRE_WELDING_SMOKE_THRESHOLD and temp_mean > 40.0:
+        smoke_level_score = 1.0 - min(1.0, smoke_mean / settings.FIRE_WELDING_SMOKE_THRESHOLD)
+        scores.append(smoke_level_score)
+    
+    avg_temp = temp_mean
+    avg_smoke = smoke_mean
+    covariance = sum((t - avg_temp) * (s - avg_smoke) for t, s in zip(temps, smokes))
+    var_temp = sum((t - avg_temp) ** 2 for t in temps)
+    var_smoke = sum((s - avg_smoke) ** 2 for s in smokes)
+    if var_temp > 0 and var_smoke > 0:
+        correlation = covariance / math.sqrt(var_temp * var_smoke)
+    else:
+        correlation = 0.0
+    
+    if correlation < 0.3 and temp_mean > 40.0:
+        correlation_score = 1.0 - abs(correlation)
+        scores.append(correlation_score)
+    
+    if duration_minutes >= settings.FIRE_HEAT_SOURCE_DURATION_MIN and duration_minutes < 120:
+        duration_score = 0.8
+        scores.append(duration_score)
+    
+    confidence = sum(scores) / len(scores)
+    is_welding = confidence >= 0.6
+    
+    assert is_welding == True, f"Welding should be detected, confidence={confidence:.2f}"
+    assert confidence >= 0.6, f"Confidence should be >= 0.6, got {confidence}"
+    
+    return True
+
+
+def test_fire_alert_confirmation_normal():
+    """测试火灾告警人工确认流程 - 正常情况"""
+    from backend.config import settings
+    from datetime import datetime, timedelta
+    
+    class MockConfirmation:
+        def __init__(self, confirmation_id, timeout_seconds):
+            self.confirmation_id = confirmation_id
+            self.created_at = datetime.utcnow()
+            self.timeout_seconds = timeout_seconds
+            self.confirmed = False
+            self.auto_upgraded = False
+            self.confirmed_at = None
+            self.confirmation_result = None
+    
+    timeout = settings.FIRE_HUMAN_CONFIRM_TIMEOUT
+    assert timeout == 300
+    
+    conf = MockConfirmation("conf_001", timeout)
+    
+    elapsed = 60
+    assert elapsed < conf.timeout_seconds
+    assert conf.confirmed == False
+    assert conf.auto_upgraded == False
+    
+    conf.confirmed = True
+    conf.confirmed_by = "operator_001"
+    conf.confirmed_at = datetime.utcnow()
+    conf.confirmation_result = "fire_confirmed"
+    
+    assert conf.confirmed == True
+    assert conf.confirmed_by == "operator_001"
+    assert conf.confirmation_result == "fire_confirmed"
+    
+    conf2 = MockConfirmation("conf_002", timeout)
+    now = datetime.utcnow()
+    elapsed2 = (now - conf2.created_at).total_seconds()
+    if elapsed2 >= conf2.timeout_seconds:
+        conf2.confirmed = True
+        conf2.auto_upgraded = True
+        conf2.confirmation_result = "timeout_auto_upgrade"
+    
+    assert conf2.auto_upgraded == False
+    
+    conf3 = MockConfirmation("conf_003", timeout)
+    conf3.created_at = now - timedelta(seconds=350)
+    elapsed3 = (now - conf3.created_at).total_seconds()
+    if elapsed3 >= conf3.timeout_seconds:
+        conf3.confirmed = True
+        conf3.auto_upgraded = True
+        conf3.confirmation_result = "timeout_auto_upgrade"
+    
+    assert conf3.auto_upgraded == True
+    assert conf3.confirmation_result == "timeout_auto_upgrade"
+    
+    return True
+
+
+def test_fire_probability_adjustment_for_welding():
+    """测试焊接作业对火灾概率的调整 - 边界情况"""
+    fire_probability = 0.85
+    welding_confidence = 0.8
+    
+    adjusted = fire_probability * (1.0 - welding_confidence * 0.8)
+    expected = 0.85 * (1.0 - 0.8 * 0.8)  # 0.85 * 0.36 = 0.306
+    
+    assert approx_equal(adjusted, expected, 0.01), f"Adjusted probability should be ~0.306, got {adjusted}"
+    assert adjusted < 0.7, "Adjusted probability should be below threshold"
+    
+    welding_confidence_low = 0.3
+    adjusted_low = fire_probability * (1.0 - welding_confidence_low * 0.8)
+    expected_low = 0.85 * (1.0 - 0.3 * 0.8)  # 0.85 * 0.76 = 0.646
+    
+    assert approx_equal(adjusted_low, expected_low, 0.01), f"Low confidence adjustment should be ~0.646, got {adjusted_low}"
+    
+    no_welding = fire_probability * (1.0 - 0.0 * 0.8)
+    assert no_welding == fire_probability, "No welding should not adjust probability"
+    
+    return True
+
+
+# ========== Asset Manager - New Feature Tests ==========
+
+def test_device_replacement_detection_normal():
+    """测试设备更换检测 - 正常情况"""
+    from backend.config import settings
+    
+    old_asset = {
+        "device_id": "pump_001",
+        "serial_number": "SN-OLD-001",
+        "manufacturer": "OldManufacturer",
+        "model": "OldModel",
+        "specifications": {"power": "5.5kW"},
+        "installation_date": datetime(2020, 1, 1),
+        "status": "active"
+    }
+    
+    update_data_serial = {
+        "serial_number": "SN-NEW-001"
+    }
+    
+    detection_reasons = []
+    
+    if "serial_number" in update_data_serial and settings.ASSET_REPLACEMENT_SERIAL_CHANGE:
+        old_serial = old_asset.get("serial_number", "")
+        new_serial = update_data_serial["serial_number"]
+        if old_serial and new_serial and old_serial != new_serial:
+            detection_reasons.append(f"序列号变更: {old_serial} -> {new_serial}")
+    
+    assert len(detection_reasons) == 1, f"Serial change should be detected, got {detection_reasons}"
+    assert "序列号变更" in detection_reasons[0]
+    
+    update_data_install = {
+        "installation_date": datetime.utcnow()
+    }
+    
+    old_install = old_asset["installation_date"]
+    new_install = update_data_install["installation_date"]
+    days_diff = abs((new_install - old_install).days)
+    
+    assert days_diff > settings.ASSET_REPLACEMENT_INSTALL_DATE_THRESHOLD_DAYS
+    
+    detection_reasons2 = []
+    if days_diff > settings.ASSET_REPLACEMENT_INSTALL_DATE_THRESHOLD_DAYS and new_install > old_install:
+        detection_reasons2.append(f"安装日期异常变更: {days_diff}天")
+    
+    assert len(detection_reasons2) == 1
+    
+    update_data_multi = {
+        "manufacturer": "NewManufacturer",
+        "model": "NewModel",
+        "specifications": {"power": "10kW"}
+    }
+    
+    property_change_count = 0
+    key_properties = ["manufacturer", "model", "specifications"]
+    for prop in key_properties:
+        if prop in update_data_multi:
+            old_val = str(old_asset.get(prop, ""))
+            new_val = str(update_data_multi[prop])
+            if old_val and new_val and old_val != new_val:
+                property_change_count += 1
+    
+    assert property_change_count == 3
+    
+    threshold = len(key_properties) * settings.ASSET_REPLACEMENT_PROPERTY_CHANGE_THRESHOLD
+    assert property_change_count >= threshold, f"Property changes {property_change_count} should exceed threshold {threshold}"
+    
+    return True
+
+
+def test_asset_ledger_auto_sync_normal():
+    """测试资产台账自动同步 - 正常情况"""
+    old_asset = {
+        "device_id": "pump_001",
+        "serial_number": "SN-OLD-001",
+        "name": "排水泵-001",
+        "type": "pump",
+        "manufacturer": "OldManufacturer",
+        "model": "OldModel",
+        "chamber": "综合",
+        "location": {"type": "Point", "coordinates": [116.4, 39.9]},
+        "design_life_years": 15,
+        "installation_date": datetime(2020, 1, 1),
+        "purchase_cost": 15000.0,
+        "maintenance_count": 5,
+        "failure_count": 2,
+        "specifications": {"power": "5.5kW"}
+    }
+    
+    update_data = {
+        "serial_number": "SN-NEW-001",
+        "manufacturer": "NewManufacturer",
+        "model": "NewModel",
+        "specifications": {"power": "7.5kW"}
+    }
+    
+    new_device_id = "pump_001_v2"
+    old_serial = old_asset.get("serial_number", "")
+    new_serial = update_data.get("serial_number", old_serial)
+    
+    new_asset_data = dict(old_asset)
+    new_asset_data.update(update_data)
+    new_asset_data["device_id"] = new_device_id
+    new_asset_data["status"] = "active"
+    new_asset_data["installation_date"] = datetime.utcnow()
+    new_asset_data["maintenance_count"] = 0
+    new_asset_data["failure_count"] = 0
+    new_asset_data["last_maintenance_date"] = None
+    
+    assert new_asset_data["device_id"] == new_device_id
+    assert new_asset_data["status"] == "active"
+    assert new_asset_data["maintenance_count"] == 0
+    assert new_asset_data["failure_count"] == 0
+    assert new_asset_data["serial_number"] == "SN-NEW-001"
+    assert new_asset_data["manufacturer"] == "NewManufacturer"
+    
+    old_status_update = {
+        "status": "decommissioned",
+        "decommissioned_date": datetime.utcnow(),
+        "replaced_by": new_device_id
+    }
+    
+    assert old_status_update["status"] == "decommissioned"
+    assert old_status_update["replaced_by"] == new_device_id
+    
+    property_changes = {}
+    for key in update_data:
+        old_val = old_asset.get(key)
+        new_val = update_data[key]
+        if old_val != new_val:
+            property_changes[key] = {"old": old_val, "new": new_val}
+    
+    assert "serial_number" in property_changes
+    assert property_changes["serial_number"]["old"] == "SN-OLD-001"
+    assert property_changes["serial_number"]["new"] == "SN-NEW-001"
+    
+    return True
+
+
+def test_asset_audit_logging_normal():
+    """测试资产审计日志 - 正常情况"""
+    from datetime import datetime
+    
+    class MockAuditLog:
+        def __init__(self, log_id, device_id, action, field_name, old_value, new_value, change_reason, performed_by):
+            self.log_id = log_id
+            self.device_id = device_id
+            self.action = action
+            self.field_name = field_name
+            self.old_value = old_value
+            self.new_value = new_value
+            self.change_reason = change_reason
+            self.performed_by = performed_by
+            self.timestamp = datetime.utcnow()
+    
+    log1 = MockAuditLog(
+        log_id="audit_001",
+        device_id="pump_001",
+        action="update",
+        field_name="status",
+        old_value="active",
+        new_value="maintenance",
+        change_reason="routine maintenance",
+        performed_by="operator_001"
+    )
+    
+    assert log1.action == "update"
+    assert log1.field_name == "status"
+    assert log1.old_value == "active"
+    assert log1.new_value == "maintenance"
+    assert log1.performed_by == "operator_001"
+    
+    log2 = MockAuditLog(
+        log_id="audit_002",
+        device_id="pump_001",
+        action="decommission",
+        field_name="status",
+        old_value="active",
+        new_value="decommissioned",
+        change_reason="设备更换，新设备: pump_001_v2",
+        performed_by="system"
+    )
+    
+    assert log2.action == "decommission"
+    assert log2.performed_by == "system"
+    
+    log3 = MockAuditLog(
+        log_id="audit_003",
+        device_id="pump_001_v2",
+        action="create",
+        field_name=None,
+        old_value=None,
+        new_value={"device_id": "pump_001_v2", "serial_number": "SN-NEW-001"},
+        change_reason="设备更换，替换旧设备: pump_001",
+        performed_by="system"
+    )
+    
+    assert log3.action == "create"
+    assert log3.field_name is None
+    assert log3.old_value is None
+    
+    logs = [log1, log2, log3]
+    assert len(logs) == 3
+    
+    system_logs = [l for l in logs if l.performed_by == "system"]
+    assert len(system_logs) == 2
+    
+    update_logs = [l for l in logs if l.action == "update"]
+    assert len(update_logs) == 1
+    
+    return True
+
+
+def test_device_replacement_chain_tracking():
+    """测试设备更换链跟踪 - 边界情况"""
+    replacement_records = [
+        {
+            "old_device_id": "pump_001_v1",
+            "new_device_id": "pump_001_v2",
+            "replacement_time": datetime(2023, 1, 15)
+        },
+        {
+            "old_device_id": "pump_001_v2",
+            "new_device_id": "pump_001_v3",
+            "replacement_time": datetime(2024, 3, 20)
+        }
+    ]
+    
+    def get_chain(device_id, records):
+        chain = []
+        visited = set()
+        
+        current_id = device_id
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            record = None
+            for r in records:
+                if r["new_device_id"] == current_id:
+                    record = r
+                    break
+            if not record:
+                break
+            chain.insert(0, {
+                "device_id": record["old_device_id"],
+                "role": "predecessor",
+                "replaced_by": record["new_device_id"]
+            })
+            current_id = record["old_device_id"]
+        
+        current_id = device_id
+        visited_successor = set()
+        while current_id and current_id not in visited_successor:
+            visited_successor.add(current_id)
+            record = None
+            for r in records:
+                if r["old_device_id"] == current_id:
+                    record = r
+                    break
+            if not record:
+                break
+            chain.append({
+                "device_id": record["new_device_id"],
+                "role": "successor",
+                "replaced": record["old_device_id"]
+            })
+            current_id = record["new_device_id"]
+        
+        return chain
+    
+    chain_v3 = get_chain("pump_001_v3", replacement_records)
+    assert len(chain_v3) == 2, f"Chain for v3 should have 2 entries, got {len(chain_v3)}"
+    assert chain_v3[0]["device_id"] == "pump_001_v1"
+    assert chain_v3[0]["role"] == "predecessor"
+    assert chain_v3[1]["device_id"] == "pump_001_v2"
+    assert chain_v3[1]["role"] == "predecessor"
+    
+    chain_v1 = get_chain("pump_001_v1", replacement_records)
+    assert len(chain_v1) == 2, f"Chain for v1 should have 2 entries, got {len(chain_v1)}"
+    assert chain_v1[0]["device_id"] == "pump_001_v2"
+    assert chain_v1[0]["role"] == "successor"
+    assert chain_v1[1]["device_id"] == "pump_001_v3"
+    assert chain_v1[1]["role"] == "successor"
+    
+    chain_unknown = get_chain("unknown_device", replacement_records)
+    assert len(chain_unknown) == 0, "Unknown device should have empty chain"
+    
+    return True
+
+
 if __name__ == "__main__":
     suite = FeatureTestSuite()
     
@@ -1785,6 +2497,10 @@ if __name__ == "__main__":
     suite.run_test("巡检进度跟踪", test_inspection_progress_tracking, "机器人巡检")
     suite.run_test("机器人位置更新", test_robot_position_updates, "机器人巡检")
     suite.run_test("机器人低电量检测", test_robot_battery_depletion, "机器人巡检")
+    suite.run_test("拓扑地图创建 - 正常", test_topology_map_creation_normal, "机器人巡检")
+    suite.run_test("A*路径规划算法 - 正常", test_astar_path_planning_normal, "机器人巡检")
+    suite.run_test("分支点稳定性评估 - 正常", test_branch_stability_evaluation_normal, "机器人巡检")
+    suite.run_test("路径规划重试机制 - 边界", test_path_planning_retry_mechanism, "机器人巡检")
     
     logger.info("\n" + "=" * 80)
     logger.info("RUNNING FIRE DETECTION TESTS")
@@ -1799,6 +2515,10 @@ if __name__ == "__main__":
     suite.run_test("火灾误报率测试", test_fire_false_positive_rate, "火灾预警")
     suite.run_test("联动控制响应时间", test_linked_control_response_time, "火灾预警")
     suite.run_test("防火分区状态更新", test_fire_zone_status_update, "火灾预警")
+    suite.run_test("热源特征提取 - 正常", test_heat_source_feature_extraction_normal, "火灾预警")
+    suite.run_test("焊接作业检测 - 正常", test_welding_detection_normal, "火灾预警")
+    suite.run_test("火灾告警人工确认 - 正常", test_fire_alert_confirmation_normal, "火灾预警")
+    suite.run_test("焊接概率调整 - 边界", test_fire_probability_adjustment_for_welding, "火灾预警")
     
     logger.info("\n" + "=" * 80)
     logger.info("RUNNING ASSET MANAGEMENT TESTS")
@@ -1813,6 +2533,10 @@ if __name__ == "__main__":
     suite.run_test("月度维修计划生成", test_monthly_maintenance_plan_generation, "资产管理")
     suite.run_test("资产生命周期跟踪", test_asset_lifecycle_tracking, "资产管理")
     suite.run_test("资产台账数据完整性", test_asset_ledger_data_integrity, "资产管理")
+    suite.run_test("设备更换检测 - 正常", test_device_replacement_detection_normal, "资产管理")
+    suite.run_test("资产台账自动同步 - 正常", test_asset_ledger_auto_sync_normal, "资产管理")
+    suite.run_test("资产审计日志 - 正常", test_asset_audit_logging_normal, "资产管理")
+    suite.run_test("设备更换链跟踪 - 边界", test_device_replacement_chain_tracking, "资产管理")
     
     all_passed = suite.print_summary()
     

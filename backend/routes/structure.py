@@ -60,7 +60,7 @@ async def get_structure_heatmap(
     return {
         "chamber": chamber,
         "count": len(heatmap_data),
-        "data": [point.model_dump() for point in heatmap_data]
+        "data": [point.dict() for point in heatmap_data]
     }
 
 

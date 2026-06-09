@@ -48,10 +48,10 @@ class ControlService:
         
         control_actions = []
         
-        if sensor_data.type == "env_sensor" and sensor_data.oxygen is not None:
+        if sensor_data.data_type == "env_sensor" and sensor_data.oxygen is not None:
             control_actions = await self._process_ventilation_control(sensor_data)
         
-        if sensor_data.type == "pump" and sensor_data.level is not None:
+        if sensor_data.data_type == "pump" and sensor_data.level is not None:
             control_actions = await self._process_pump_control(sensor_data)
         
         await self._update_device_status(sensor_data.device_id)
@@ -84,15 +84,15 @@ class ControlService:
                 continue
             
             if device["type"] == "env_sensor":
-                data.type = "env_sensor"
+                data.data_type = "env_sensor"
             elif device["type"] == "pump":
-                data.type = "pump"
+                data.data_type = "pump"
             elif device["type"] == "manhole":
-                data.type = "manhole"
+                data.data_type = "manhole"
             elif device["type"] == "fan":
-                data.type = "fan"
+                data.data_type = "fan"
             else:
-                data.type = device["type"]
+                data.data_type = device["type"]
             
             if data.location is None and device.get("location"):
                 data.location = device["location"]
@@ -106,9 +106,9 @@ class ControlService:
                 }
             })
             
-            if data.type == "env_sensor" and data.oxygen is not None:
+            if data.data_type == "env_sensor" and data.oxygen is not None:
                 env_sensor_data.append((data, device))
-            if data.type == "pump" and data.level is not None:
+            if data.data_type == "pump" and data.level is not None:
                 pump_sensor_data.append((data, device))
         
         if sensor_dicts:

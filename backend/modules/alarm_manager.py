@@ -256,7 +256,7 @@ class AlarmManager:
         })
 
     async def _send_sms_alert(self, alert: Alert):
-        alert_key = f"{alert.device_id}_{alert.type}"
+        alert_key = f"{alert.device_id}_{alert.alert_type}"
 
         async with self._lock:
             if alert_key in self.sms_cooldown:
@@ -320,7 +320,7 @@ class AlarmManager:
             "device_id": device["device_id"],
             "status": "warning",
             "alert_level": alert.level,
-            "alert_type": alert.type,
+            "alert_type": alert.alert_type,
             "timestamp": datetime.utcnow().isoformat(),
             "device_info": {
                 "chamber": device.get("chamber"),

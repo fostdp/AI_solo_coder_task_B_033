@@ -95,7 +95,7 @@ async def get_life_prediction(device_id: str):
     prediction = await asset_manager.predict_remaining_life(device_id)
     if not prediction:
         raise HTTPException(status_code=404, detail=f"Asset {device_id} not found")
-    return prediction.model_dump()
+    return prediction.dict()
 
 
 @router.post("/life-prediction/batch")
@@ -103,7 +103,7 @@ async def batch_predict_life():
     predictions = await asset_manager.batch_predict_life()
     return {
         "count": len(predictions),
-        "predictions": [p.model_dump() for p in predictions]
+        "predictions": [p.dict() for p in predictions]
     }
 
 

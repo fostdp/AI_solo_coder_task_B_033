@@ -14,14 +14,18 @@ from backend.models.database import (
     life_predictions_collection,
     devices_collection,
     sensor_data_collection,
-    alerts_collection
+    alerts_collection,
+    device_replacement_history_collection,
+    asset_audit_logs_collection
 )
 from backend.models.schemas import (
     Asset,
     MaintenanceRecord,
     MaintenancePlan,
     RemainingLifePrediction,
-    MaintenanceTask
+    MaintenanceTask,
+    DeviceReplacementRecord,
+    AssetAuditLog
 )
 
 logger = logging.getLogger(__name__)
@@ -120,6 +124,10 @@ class AssetManager:
         self.redis_client: Optional[redis.Redis] = None
         self.life_model = LifePredictionModel()
         self.running = False
+        self.asset_snapshots: Dict[str, Dict[str, Any]] = {}
+        self.replacement_detection_enabled = settings.ASSET_REPLACEMENT_SERIAL_CHANGE
+        self.auto_sync_enabled = settings.ASSET_REPLACEMENT_AUTO_SYNC
+        self.audit_log_enabled = settings.ASSET_REPLACEMENT_AUDIT_LOG_ENABLED
 
     async def connect_redis(self):
         self.redis_client = redis.Redis(
@@ -160,6 +168,31 @@ class AssetManager:
         return serialize_documents(assets)
 
     async def update_asset(self, device_id: str, update_data: Dict[str, Any]) -> bool:
+        old_asset = await assets_collection.find_one({"device_id": device_id})
+        if not old_asset:
+            return False
+        
+        if self.audit_log_enabled:
+            for field_name, new_value in update_data.items():
+                old_value = old_asset.get(field_name)
+                if old_value != new_value:
+                    await self._create_audit_log(
+                        device_id=device_id,
+                        action="update",
+                        field_name=field_name,
+                        old_value=old_value,
+                        new_value=new_value,
+                        change_reason="asset_update",
+                        performed_by="system"
+                    )
+        
+        if self.replacement_detection_enabled:
+            replacement_detected = await self._detect_device_replacement(old_asset, update_data)
+            if replacement_detected:
+                logger.info(f"Device replacement detected for {device_id}")
+                if self.auto_sync_enabled:
+                    await self._sync_asset_ledger(device_id, old_asset, update_data)
+        
         result = await assets_collection.update_one(
             {"device_id": device_id},
             {"$set": update_data}
@@ -199,7 +232,7 @@ class AssetManager:
 
         prediction = self.life_model.predict(asset, sensor_history)
 
-        await life_predictions_collection.insert_one(prediction.model_dump())
+        await life_predictions_collection.insert_one(prediction.dict())
 
         return prediction
 
@@ -351,7 +384,7 @@ class AssetManager:
 
         plan_tasks = []
         for score, task in tasks:
-            task_dict = task.model_dump()
+            task_dict = task.dict()
             task_dict["priority_score"] = score
             plan_tasks.append(task_dict)
 
@@ -509,6 +542,360 @@ class AssetManager:
                 await asyncio.sleep(3600)
 
         logger.info("Monthly Plan Generator stopped")
+
+    async def _detect_device_replacement(
+        self,
+        old_asset: Dict[str, Any],
+        update_data: Dict[str, Any]
+    ) -> bool:
+        detection_reasons = []
+        
+        if "serial_number" in update_data and settings.ASSET_REPLACEMENT_SERIAL_CHANGE:
+            old_serial = old_asset.get("serial_number", "")
+            new_serial = update_data["serial_number"]
+            if old_serial and new_serial and old_serial != new_serial:
+                detection_reasons.append(f"序列号变更: {old_serial} -> {new_serial}")
+        
+        if "device_id" in update_data:
+            old_device_id = old_asset.get("device_id", "")
+            new_device_id = update_data["device_id"]
+            if old_device_id and new_device_id and old_device_id != new_device_id:
+                detection_reasons.append(f"设备ID变更: {old_device_id} -> {new_device_id}")
+        
+        if "installation_date" in update_data:
+            old_install_date = old_asset.get("installation_date")
+            new_install_date = update_data["installation_date"]
+            if old_install_date and new_install_date:
+                if isinstance(old_install_date, datetime):
+                    old_dt = old_install_date
+                else:
+                    old_dt = datetime.fromisoformat(str(old_install_date).replace('Z', '+00:00'))
+                if isinstance(new_install_date, datetime):
+                    new_dt = new_install_date
+                else:
+                    new_dt = datetime.fromisoformat(str(new_install_date).replace('Z', '+00:00'))
+                days_diff = abs((new_dt - old_dt).days)
+                if days_diff > settings.ASSET_REPLACEMENT_INSTALL_DATE_THRESHOLD_DAYS and new_dt > old_dt:
+                    detection_reasons.append(f"安装日期异常变更: {days_diff}天")
+        
+        property_change_count = 0
+        key_properties = ["manufacturer", "model", "specifications"]
+        for prop in key_properties:
+            if prop in update_data:
+                old_val = str(old_asset.get(prop, ""))
+                new_val = str(update_data[prop])
+                if old_val and new_val and old_val != new_val:
+                    property_change_count += 1
+        
+        if property_change_count >= len(key_properties) * settings.ASSET_REPLACEMENT_PROPERTY_CHANGE_THRESHOLD:
+            detection_reasons.append(f"关键属性突变: {property_change_count}项变更")
+        
+        if detection_reasons:
+            logger.info(f"Device replacement detected for {old_asset.get('device_id')}: {', '.join(detection_reasons)}")
+            return True
+        
+        return False
+
+    async def _sync_asset_ledger(
+        self,
+        device_id: str,
+        old_asset: Dict[str, Any],
+        update_data: Dict[str, Any],
+        replacement_reason: str = "auto_detected"
+    ) -> Optional[DeviceReplacementRecord]:
+        try:
+            old_serial = old_asset.get("serial_number", "")
+            new_serial = update_data.get("serial_number", old_serial)
+            new_device_id = update_data.get("device_id", device_id)
+            
+            new_asset_data = dict(old_asset)
+            new_asset_data.update(update_data)
+            new_asset_data["device_id"] = new_device_id
+            new_asset_data["status"] = "active"
+            new_asset_data["installation_date"] = datetime.utcnow()
+            new_asset_data["maintenance_count"] = 0
+            new_asset_data["failure_count"] = 0
+            new_asset_data["last_maintenance_date"] = None
+            
+            if "_id" in new_asset_data:
+                del new_asset_data["_id"]
+            
+            new_asset = Asset(**new_asset_data)
+            await assets_collection.insert_one(new_asset.model_dump(exclude={"id"}))
+            
+            old_status_update = {
+                "status": "decommissioned",
+                "decommissioned_date": datetime.utcnow(),
+                "replaced_by": new_device_id
+            }
+            await assets_collection.update_one(
+                {"device_id": device_id},
+                {"$set": old_status_update}
+            )
+            
+            if self.audit_log_enabled:
+                await self._create_audit_log(
+                    device_id=device_id,
+                    action="decommission",
+                    field_name="status",
+                    old_value=old_asset.get("status", "active"),
+                    new_value="decommissioned",
+                    change_reason=f"设备更换，新设备: {new_device_id}",
+                    performed_by="system"
+                )
+                await self._create_audit_log(
+                    device_id=new_device_id,
+                    action="create",
+                    field_name=None,
+                    old_value=None,
+                    new_value=new_asset_data,
+                    change_reason=f"设备更换，替换旧设备: {device_id}",
+                    performed_by="system"
+                )
+            
+            property_changes = {}
+            for key in update_data:
+                old_val = old_asset.get(key)
+                new_val = update_data[key]
+                if old_val != new_val:
+                    property_changes[key] = {"old": old_val, "new": new_val}
+            
+            record_id = f"replace_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{device_id}"
+            replacement_record = DeviceReplacementRecord(
+                record_id=record_id,
+                old_device_id=device_id,
+                new_device_id=new_device_id,
+                old_serial_number=old_serial,
+                new_serial_number=new_serial,
+                replacement_reason=replacement_reason,
+                property_changes=property_changes
+            )
+            
+            await device_replacement_history_collection.insert_one(replacement_record.model_dump(exclude={"id"}))
+            
+            if self.redis_client:
+                await self.redis_client.publish(
+                    "tunnel:asset:replacement",
+                    json.dumps({
+                        "record_id": record_id,
+                        "old_device_id": device_id,
+                        "new_device_id": new_device_id,
+                        "replacement_reason": replacement_reason,
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                )
+            
+            logger.info(f"Asset ledger synced: {device_id} replaced by {new_device_id}")
+            return replacement_record
+            
+        except Exception as e:
+            logger.error(f"Error syncing asset ledger for {device_id}: {e}")
+            return None
+
+    async def _create_audit_log(
+        self,
+        device_id: str,
+        action: str,
+        field_name: Optional[str],
+        old_value: Optional[Any],
+        new_value: Optional[Any],
+        change_reason: Optional[str],
+        performed_by: str
+    ) -> AssetAuditLog:
+        log_id = f"audit_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}_{device_id}"
+        
+        audit_log = AssetAuditLog(
+            log_id=log_id,
+            device_id=device_id,
+            action=action,
+            field_name=field_name,
+            old_value=old_value,
+            new_value=new_value,
+            change_reason=change_reason,
+            performed_by=performed_by
+        )
+        
+        try:
+            await asset_audit_logs_collection.insert_one(audit_log.model_dump(exclude={"id"}))
+        except Exception as e:
+            logger.error(f"Error creating audit log for {device_id}: {e}")
+        
+        return audit_log
+
+    async def get_device_replacement_history(
+        self,
+        device_id: Optional[str] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        query = {}
+        if device_id:
+            query["$or"] = [
+                {"old_device_id": device_id},
+                {"new_device_id": device_id}
+            ]
+        
+        records = await device_replacement_history_collection.find(
+            query
+        ).sort("replacement_time", -1).limit(limit).to_list(length=limit)
+        
+        from backend.models.database import serialize_documents
+        return serialize_documents(records)
+
+    async def get_asset_audit_logs(
+        self,
+        device_id: Optional[str] = None,
+        action: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        query = {}
+        if device_id:
+            query["device_id"] = device_id
+        if action:
+            query["action"] = action
+        
+        logs = await asset_audit_logs_collection.find(
+            query
+        ).sort("timestamp", -1).limit(limit).to_list(length=limit)
+        
+        from backend.models.database import serialize_documents
+        return serialize_documents(logs)
+
+    async def manual_device_replacement(
+        self,
+        old_device_id: str,
+        new_asset_data: Dict[str, Any],
+        replacement_reason: str,
+        performed_by: str
+    ) -> Tuple[bool, Optional[DeviceReplacementRecord]]:
+        old_asset = await assets_collection.find_one({"device_id": old_device_id})
+        if not old_asset:
+            return False, None
+        
+        new_serial = new_asset_data.get("serial_number", "")
+        if not new_serial:
+            return False, None
+        
+        update_data = new_asset_data
+        
+        if self.audit_log_enabled:
+            await self._create_audit_log(
+                device_id=old_device_id,
+                action="manual_replacement_start",
+                field_name=None,
+                old_value=old_asset,
+                new_value=new_asset_data,
+                change_reason=replacement_reason,
+                performed_by=performed_by
+            )
+        
+        replacement_record = await self._sync_asset_ledger(
+            old_device_id,
+            old_asset,
+            update_data,
+            replacement_reason
+        )
+        
+        if replacement_record:
+            await device_replacement_history_collection.update_one(
+                {"record_id": replacement_record.record_id},
+                {"$set": {"performed_by": performed_by}}
+            )
+            return True, replacement_record
+        
+        return False, None
+
+    async def scan_for_device_replacements(self) -> List[str]:
+        replaced_devices = []
+        assets = await assets_collection.find({"status": "active"}).to_list(length=1000)
+        
+        for asset in assets:
+            device_id = asset.get("device_id")
+            if not device_id:
+                continue
+            
+            try:
+                device = await devices_collection.find_one({"device_id": device_id})
+                if device:
+                    device_serial = device.get("properties", {}).get("serial_number", "")
+                    asset_serial = asset.get("serial_number", "")
+                    
+                    if device_serial and asset_serial and device_serial != asset_serial:
+                        logger.info(f"Serial mismatch detected for {device_id}: asset={asset_serial}, device={device_serial}")
+                        
+                        update_data = {
+                            "serial_number": device_serial,
+                            "manufacturer": device.get("properties", {}).get("manufacturer", asset.get("manufacturer", "")),
+                            "model": device.get("properties", {}).get("model", asset.get("model", ""))
+                        }
+                        
+                        replaced = await self._detect_device_replacement(asset, update_data)
+                        if replaced and self.auto_sync_enabled:
+                            await self._sync_asset_ledger(
+                                device_id, asset, update_data, "serial_mismatch_scan"
+                            )
+                            replaced_devices.append(device_id)
+            
+            except Exception as e:
+                logger.error(f"Error scanning {device_id} for replacement: {e}")
+                continue
+        
+        logger.info(f"Device replacement scan completed: {len(replaced_devices)} replacements found")
+        return replaced_devices
+
+    async def get_replacement_chain(self, device_id: str) -> List[Dict[str, Any]]:
+        chain = []
+        visited = set()
+        
+        current_id = device_id
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            record = await device_replacement_history_collection.find_one({
+                "new_device_id": current_id
+            })
+            if not record:
+                break
+            chain.insert(0, {
+                "device_id": record["old_device_id"],
+                "role": "predecessor",
+                "replaced_by": record["new_device_id"],
+                "replacement_time": record.get("replacement_time")
+            })
+            current_id = record["old_device_id"]
+        
+        current_id = device_id
+        visited_successor = set()
+        while current_id and current_id not in visited_successor:
+            visited_successor.add(current_id)
+            record = await device_replacement_history_collection.find_one({
+                "old_device_id": current_id
+            })
+            if not record:
+                break
+            chain.append({
+                "device_id": record["new_device_id"],
+                "role": "successor",
+                "replaced": record["old_device_id"],
+                "replacement_time": record.get("replacement_time")
+            })
+            current_id = record["new_device_id"]
+        
+        return chain
+
+    async def start_replacement_scan_service(self):
+        self.running = True
+        logger.info("Device Replacement Scan Service started")
+
+        while self.running:
+            try:
+                await asyncio.sleep(24 * 3600)
+                logger.info("Starting daily device replacement scan...")
+                replacements = await self.scan_for_device_replacements()
+                logger.info(f"Completed device replacement scan: {len(replacements)} replacements found")
+            except Exception as e:
+                logger.error(f"Device replacement scan service error: {e}")
+                await asyncio.sleep(3600)
+
+        logger.info("Device Replacement Scan Service stopped")
 
 
 asset_manager = AssetManager()

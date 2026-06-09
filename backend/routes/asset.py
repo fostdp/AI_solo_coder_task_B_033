@@ -89,14 +89,14 @@ async def get_life_prediction(device_id: str):
     if not prediction:
         raise HTTPException(status_code=404, detail=f"Asset {device_id} not found")
     return {
-        "data": prediction.model_dump()
+        "data": prediction.dict()
     }
 
 
 @router.get("/batch-life-prediction")
 async def get_batch_life_prediction():
     predictions = await asset_manager.batch_predict_life()
-    prediction_data = [p.model_dump() for p in predictions]
+    prediction_data = [p.dict() for p in predictions]
     return {
         "data": prediction_data,
         "count": len(prediction_data)
@@ -110,7 +110,7 @@ async def generate_maintenance_plan(year: int, month: int):
     plan = await asset_manager.generate_monthly_maintenance_plan(year, month)
     return {
         "status": "success",
-        "data": plan.model_dump()
+        "data": plan.dict()
     }
 
 

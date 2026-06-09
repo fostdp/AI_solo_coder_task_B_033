@@ -1,3 +1,4 @@
+from typing import Dict
 from pydantic import BaseModel
 
 
@@ -52,6 +53,10 @@ class Settings(BaseModel):
     STRUCTURE_STRAIN_ALARM: float = 400.0
     STRUCTURE_CRACK_WARNING: float = 0.2
     STRUCTURE_CRACK_ALARM: float = 0.5
+    FIBER_BREAK_STRAIN_THRESHOLD: float = -500.0
+    FIBER_BREAK_DETECTION_WINDOW: int = 3
+    FIBER_DATA_TIMEOUT_SECONDS: int = 30
+    FIBER_INTERPOLATION_MAX_GAP: float = 0.5
 
     FIRE_TEMP_RATE_WARNING: float = 2.0
     FIRE_TEMP_RATE_ALARM: float = 5.0
@@ -66,10 +71,32 @@ class Settings(BaseModel):
     ROBOT_AVOID_HIGH_HUMIDITY: float = 80.0
     ROBOT_AVOID_GAS_METHANE: float = 0.5
     ROBOT_AVOID_GAS_H2S: float = 5.0
+    ROBOT_TOPOLOGY_MAP_FILE: str = "data/topology_map.json"
+    ROBOT_PATH_PLANNING_ATTEMPTS: int = 3
+    ROBOT_BRANCH_STABILITY_THRESHOLD: float = 0.7
+    ROBOT_GLOBAL_PLANNING_WEIGHT: Dict[str, float] = {
+        "distance": 0.4,
+        "safety": 0.3,
+        "energy": 0.2,
+        "time": 0.1
+    }
 
     ASSET_LIFE_PREDICTION_MODEL: str = "rule_based"
     MAINTENANCE_MONTHLY_PRIORITY_WEIGHT: float = 1.5
     MAINTENANCE_RISK_WEIGHT: float = 2.0
+
+    FIRE_WELDING_TEMP_FLUCTUATION: float = 5.0
+    FIRE_WELDING_CYCLE_SECONDS: int = 60
+    FIRE_WELDING_SMOKE_THRESHOLD: float = 3.0
+    FIRE_HUMAN_CONFIRM_TIMEOUT: int = 300
+    FIRE_HEAT_SOURCE_DURATION_MIN: int = 5
+    FIRE_TEMP_DISTRIBUTION_THRESHOLD: float = 10.0
+
+    ASSET_REPLACEMENT_SERIAL_CHANGE: bool = True
+    ASSET_REPLACEMENT_INSTALL_DATE_THRESHOLD_DAYS: int = 7
+    ASSET_REPLACEMENT_PROPERTY_CHANGE_THRESHOLD: float = 0.3
+    ASSET_REPLACEMENT_AUTO_SYNC: bool = True
+    ASSET_REPLACEMENT_AUDIT_LOG_ENABLED: bool = True
 
 
 settings = Settings()

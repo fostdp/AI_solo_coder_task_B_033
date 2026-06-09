@@ -43,6 +43,12 @@ assets_collection = db["assets"]
 maintenance_records_collection = db["maintenance_records"]
 maintenance_plans_collection = db["maintenance_plans"]
 life_predictions_collection = db["life_predictions"]
+topology_map_collection = db["topology_map"]
+robot_path_plans_collection = db["robot_path_plans"]
+fire_alert_confirmations_collection = db["fire_alert_confirmations"]
+heat_source_analysis_collection = db["heat_source_analysis"]
+device_replacement_history_collection = db["device_replacement_history"]
+asset_audit_logs_collection = db["asset_audit_logs"]
 
 
 def serialize_document(doc):

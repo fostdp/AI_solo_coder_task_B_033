@@ -184,7 +184,7 @@ class AlertService:
             logger.info(f"SMS skipped for {alert.level} alert: {alert.message} (WebSocket only)")
     
     async def _send_sms(self, alert: Alert):
-        alert_key = f"{alert.device_id}_{alert.type}"
+        alert_key = f"{alert.device_id}_{alert.alert_type}"
         
         if alert_key in self.sms_sent:
             last_sent = self.sms_sent[alert_key]
