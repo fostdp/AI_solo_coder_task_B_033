@@ -34,13 +34,16 @@ class AlertLevel(str, Enum):
 
 
 class Location(BaseModel):
-    type: str = "Point"
+    type_: str = Field(default="Point", alias="type", description="GeoJSON type")
     coordinates: List[float]
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class SensorData(BaseModel):
     device_id: str
-    type: Optional[str] = None
+    type_: Optional[str] = Field(default=None, alias="type", description="Sensor data type")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     temperature: Optional[float] = None
     humidity: Optional[float] = None
@@ -61,11 +64,14 @@ class SensorData(BaseModel):
     robot_speed: Optional[float] = None
     distance_km: Optional[float] = None
 
+    class Config:
+        allow_population_by_field_name = True
+
 
 class Device(BaseModel):
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
     device_id: str
-    type: DeviceType
+    type_: DeviceType = Field(alias="type", description="Device type")
     chamber: str
     name: str
     status: DeviceStatus = DeviceStatus.NORMAL
@@ -76,13 +82,14 @@ class Device(BaseModel):
     class Config:
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
+        allow_population_by_field_name = True
 
 
 class Alert(BaseModel):
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
     device_id: str
     level: AlertLevel
-    type: str
+    type_: str = Field(alias="type", description="Alert type")
     message: str
     value: float
     threshold: float
@@ -92,6 +99,7 @@ class Alert(BaseModel):
     class Config:
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
+        allow_population_by_field_name = True
 
 
 class ControlCommand(BaseModel):
@@ -132,11 +140,12 @@ class HealthScore(BaseModel):
 
 
 class TunnelFeature(BaseModel):
-    type: str
+    type_: str = Field(alias="type", description="GeoJSON feature type")
     properties: Dict[str, Any]
     geometry: Dict[str, Any]
 
     class Config:
+        allow_population_by_field_name = True
         schema_extra = {
             "example": {
                 "type": "Feature",
@@ -292,7 +301,7 @@ class Asset(BaseModel):
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
     device_id: str
     name: str
-    type: str
+    type_: str = Field(alias="type", description="Asset type")
     manufacturer: str
     model: str
     serial_number: str
@@ -311,6 +320,7 @@ class Asset(BaseModel):
     class Config:
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
+        allow_population_by_field_name = True
 
 
 class MaintenanceRecord(BaseModel):

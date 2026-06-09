@@ -1,0 +1,233 @@
+{
+  "summary": {
+    "total": 37,
+    "passed": 37,
+    "failed": 0,
+    "pass_rate": 100.0
+  },
+  "results": [
+    {
+      "name": "光纤应变数据解析 - 正常",
+      "status": "pass",
+      "duration": 0.000756,
+      "category": "结构监测"
+    },
+    {
+      "name": "光纤应变数据解析 - 边界",
+      "status": "pass",
+      "duration": 1.4e-05,
+      "category": "结构监测"
+    },
+    {
+      "name": "光纤应变数据解析 - 异常",
+      "status": "pass",
+      "duration": 1.6e-05,
+      "category": "结构监测"
+    },
+    {
+      "name": "应变映射和定位准确性",
+      "status": "pass",
+      "duration": 3.4e-05,
+      "category": "结构监测"
+    },
+    {
+      "name": "结构热力图生成 - 正常",
+      "status": "pass",
+      "duration": 5.5e-05,
+      "category": "结构监测"
+    },
+    {
+      "name": "结构热力图生成 - 边界",
+      "status": "pass",
+      "duration": 1.5e-05,
+      "category": "结构监测"
+    },
+    {
+      "name": "热力图颜色映射正确性",
+      "status": "pass",
+      "duration": 1.6e-05,
+      "category": "结构监测"
+    },
+    {
+      "name": "裂缝预警及时性",
+      "status": "pass",
+      "duration": 2.7e-05,
+      "category": "结构监测"
+    },
+    {
+      "name": "裂缝预警误报率测试",
+      "status": "pass",
+      "duration": 0.000661,
+      "category": "结构监测"
+    },
+    {
+      "name": "告警冷却机制测试",
+      "status": "pass",
+      "duration": 0.000125,
+      "category": "结构监测"
+    },
+    {
+      "name": "路径规划避障 - 高温",
+      "status": "pass",
+      "duration": 1.6e-05,
+      "category": "机器人巡检"
+    },
+    {
+      "name": "路径规划避障 - 高湿",
+      "status": "pass",
+      "duration": 8e-06,
+      "category": "机器人巡检"
+    },
+    {
+      "name": "路径规划避障 - 有害气体",
+      "status": "pass",
+      "duration": 1.4e-05,
+      "category": "机器人巡检"
+    },
+    {
+      "name": "路径长度优化测试",
+      "status": "pass",
+      "duration": 0.002386,
+      "category": "机器人巡检"
+    },
+    {
+      "name": "路径规划边界情况",
+      "status": "pass",
+      "duration": 1.4e-05,
+      "category": "机器人巡检"
+    },
+    {
+      "name": "传感器数据融合准确性",
+      "status": "pass",
+      "duration": 1.9e-05,
+      "category": "机器人巡检"
+    },
+    {
+      "name": "巡检进度跟踪",
+      "status": "pass",
+      "duration": 0.000178,
+      "category": "机器人巡检"
+    },
+    {
+      "name": "机器人位置更新",
+      "status": "pass",
+      "duration": 9.7e-05,
+      "category": "机器人巡检"
+    },
+    {
+      "name": "机器人低电量检测",
+      "status": "pass",
+      "duration": 5.5e-05,
+      "category": "机器人巡检"
+    },
+    {
+      "name": "温度变化率计算准确性",
+      "status": "pass",
+      "duration": 5.2e-05,
+      "category": "火灾预警"
+    },
+    {
+      "name": "烟雾浓度变化率计算",
+      "status": "pass",
+      "duration": 5.5e-05,
+      "category": "火灾预警"
+    },
+    {
+      "name": "温度烟雾相关性计算",
+      "status": "pass",
+      "duration": 7.3e-05,
+      "category": "火灾预警"
+    },
+    {
+      "name": "贝叶斯火灾概率计算",
+      "status": "pass",
+      "duration": 1.1e-05,
+      "category": "火灾预警"
+    },
+    {
+      "name": "火灾与设备过热区分准确率",
+      "status": "pass",
+      "duration": 9e-06,
+      "category": "火灾预警"
+    },
+    {
+      "name": "火灾概率边界值测试",
+      "status": "pass",
+      "duration": 1.1e-05,
+      "category": "火灾预警"
+    },
+    {
+      "name": "火灾误报率测试",
+      "status": "pass",
+      "duration": 0.001288,
+      "category": "火灾预警"
+    },
+    {
+      "name": "联动控制响应时间",
+      "status": "pass",
+      "duration": 0.000261,
+      "category": "火灾预警"
+    },
+    {
+      "name": "防火分区状态更新",
+      "status": "pass",
+      "duration": 0.000101,
+      "category": "火灾预警"
+    },
+    {
+      "name": "资产数据完整性检查",
+      "status": "pass",
+      "duration": 1.7e-05,
+      "category": "资产管理"
+    },
+    {
+      "name": "资产创建边界情况",
+      "status": "pass",
+      "duration": 5.8e-05,
+      "category": "资产管理"
+    },
+    {
+      "name": "设备寿命预测准确度",
+      "status": "pass",
+      "duration": 0.009504,
+      "category": "资产管理"
+    },
+    {
+      "name": "寿命预测模型有效性",
+      "status": "pass",
+      "duration": 0.000136,
+      "category": "资产管理"
+    },
+    {
+      "name": "维护优先级计算",
+      "status": "pass",
+      "duration": 3.2e-05,
+      "category": "资产管理"
+    },
+    {
+      "name": "维修计划优先级排序",
+      "status": "pass",
+      "duration": 6.5e-05,
+      "category": "资产管理"
+    },
+    {
+      "name": "月度维修计划生成",
+      "status": "pass",
+      "duration": 0.000142,
+      "category": "资产管理"
+    },
+    {
+      "name": "资产生命周期跟踪",
+      "status": "pass",
+      "duration": 3.4e-05,
+      "category": "资产管理"
+    },
+    {
+      "name": "资产台账数据完整性",
+      "status": "pass",
+      "duration": 0.00014,
+      "category": "资产管理"
+    }
+  ],
+  "generated_at": "2026-06-09T01:46:10.488735"
+}
